@@ -76,7 +76,7 @@ TOOL_SCHEMAS: List[ToolSchema] = [
                     description="Nombre corto deducido del contexto (2-4 palabras, ej: 'Almuerzo', 'Sueldo marzo'). SIEMPRE enviar.",
                 ),
             },
-            required=["amount", "category"],
+            required=["amount"],
         ),
     ),
     ToolSchema(

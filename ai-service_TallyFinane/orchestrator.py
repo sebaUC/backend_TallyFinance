@@ -7,7 +7,7 @@ from typing import List
 
 from openai import OpenAI
 
-from config import Settings
+from config import Settings, settings as app_settings
 from schemas import (
     ActionResult,
     ConversationMessage,
@@ -82,6 +82,79 @@ class Orchestrator:
 
         return MOOD_LADDER[target_idx]
 
+    def _call_gemini_json(
+        self,
+        messages: list,
+        temperature: float,
+        media: list | None = None,
+        cid: str | None = None,
+    ) -> dict:
+        """Call Gemini API with JSON response format. Supports multimodal (images, audio, docs)."""
+        try:
+            from google import genai
+            from google.genai import types
+            import base64
+        except ImportError:
+            raise RuntimeError("google-genai not installed. Run: pip install google-genai")
+
+        if not app_settings.GEMINI_API_KEY:
+            raise RuntimeError("GEMINI_API_KEY not configured")
+
+        start = time.time()
+        log = debug_log.openai
+        log.link("Calling Gemini (JSON)", {
+            "model": app_settings.GEMINI_MODEL,
+            "temp": temperature,
+            "media": len(media) if media else 0,
+        }, cid)
+
+        client = genai.Client(api_key=app_settings.GEMINI_API_KEY)
+
+        # Convert OpenAI message format to Gemini format
+        system_instruction = None
+        contents = []
+        for msg in messages:
+            if msg["role"] == "system":
+                system_instruction = msg["content"]
+            elif msg["role"] == "user":
+                # Build parts: text + any media attachments
+                parts = [types.Part.from_text(text=msg["content"])]
+
+                # Append media to the last user message
+                if media and msg == messages[-1]:
+                    for m in media:
+                        try:
+                            raw_bytes = base64.b64decode(m.data if hasattr(m, 'data') else m['data'])
+                            mime = m.mime_type if hasattr(m, 'mime_type') else m['mime_type']
+                            parts.append(types.Part.from_bytes(data=raw_bytes, mime_type=mime))
+                            log.state("Media attached", {"type": m.type if hasattr(m, 'type') else m['type'], "mime": mime}, cid)
+                        except Exception as media_err:
+                            log.warn(f"Failed to attach media: {str(media_err)[:50]}", cid=cid)
+
+                contents.append(types.Content(role="user", parts=parts))
+            elif msg["role"] == "assistant":
+                contents.append(types.Content(role="model", parts=[types.Part.from_text(text=msg["content"])]))
+
+        config = types.GenerateContentConfig(
+            temperature=temperature,
+            response_mime_type="application/json",
+            system_instruction=system_instruction,
+        )
+
+        response = client.models.generate_content(
+            model=app_settings.GEMINI_MODEL,
+            contents=contents,
+            config=config,
+        )
+
+        raw = (response.text or "").strip()
+        # Sanitize: Flash-Lite sometimes wraps JSON in markdown code fences
+        if raw.startswith("```"):
+            raw = raw.strip("`").removeprefix("json").strip()
+        elapsed = (time.time() - start) * 1000
+        log.perf("Gemini JSON response", elapsed, cid)
+        return json.loads(raw) if raw else {}
+
     def _call_openai_json(
         self,
         messages: list,
@@ -153,6 +226,7 @@ class Orchestrator:
         pending: PendingSlotContext | None = None,
         available_categories: List[str] | None = None,
         conversation_history: List[ConversationMessage] | None = None,
+        media: list | None = None,
         cid: str | None = None,
     ) -> OrchestrateResponsePhaseA:
         """
@@ -216,11 +290,38 @@ IMPORTANTE: Combina los args recolectados con lo nuevo del usuario."""
 
         messages.append({"role": "user", "content": user_text})
 
-        data = self._call_openai_json(
-            messages=messages,
-            temperature=self.config.OPENAI_TEMPERATURE_PHASE_A,
-            cid=cid,
-        )
+        # Select provider for Phase A
+        provider = app_settings.PHASE_A_PROVIDER
+        has_media = bool(media)
+        # Force Gemini if media is present (OpenAI doesn't support multimodal in JSON mode)
+        use_gemini = (provider == "gemini" or has_media) and app_settings.GEMINI_API_KEY
+
+        if use_gemini:
+            log.phase_a("Using Gemini", {"model": app_settings.GEMINI_MODEL, "media": len(media) if media else 0}, cid)
+            try:
+                data = self._call_gemini_json(
+                    messages=messages,
+                    temperature=self.config.OPENAI_TEMPERATURE_PHASE_A,
+                    media=media,
+                    cid=cid,
+                )
+            except Exception as exc:
+                if has_media:
+                    # Can't fallback to OpenAI with media
+                    raise
+                # Fallback to OpenAI on Gemini failure (503, rate limit, etc.)
+                log.warn(f"Gemini failed, falling back to OpenAI: {str(exc)[:60]}", cid=cid)
+                data = self._call_openai_json(
+                    messages=messages,
+                    temperature=self.config.OPENAI_TEMPERATURE_PHASE_A,
+                    cid=cid,
+                )
+        else:
+            data = self._call_openai_json(
+                messages=messages,
+                temperature=self.config.OPENAI_TEMPERATURE_PHASE_A,
+                cid=cid,
+            )
 
         # Log raw LLM response for debugging
         log.state("LLM raw response", {"data": data}, cid)
@@ -447,6 +548,81 @@ NUDGES PERMITIDOS:
             did_nudge=did_nudge,
             nudge_type=nudge_type,
         )
+
+    def nlu_test(
+        self,
+        user_text: str,
+        provider: str = "openai",
+        available_categories: List[str] | None = None,
+        cid: str | None = None,
+    ) -> dict:
+        """
+        Test NLU (Phase A only) with different providers.
+        Returns raw LLM response + timing for comparison.
+        """
+        import time as _time
+
+        log = debug_log.orchestrator
+        log.phase_a(f"NLU Test ({provider})", {"text": user_text[:50]}, cid)
+
+        # Build minimal context for testing
+        from tool_schemas import get_tool_schemas
+        tools = get_tool_schemas()
+
+        dummy_context = MinimalUserContext(
+            user_id="nlu-test",
+            personality=None,
+            prefs=None,
+            active_budget=None,
+            goals_summary=[],
+        )
+
+        system_prompt_template = self.load_prompt("phase_a_system.txt")
+        user_context_json = json.dumps(dummy_context.model_dump(), ensure_ascii=False, indent=2)
+        tool_schemas_json = json.dumps([t.model_dump() for t in tools], ensure_ascii=False, indent=2)
+        pending_context_text = "Sin contexto pendiente (mensaje nuevo)."
+
+        if available_categories:
+            categories_text = "Categorías del usuario: " + ", ".join(available_categories)
+        else:
+            categories_text = "Categorías del usuario: Alimentación, Transporte, Hogar, Salud, Personal, Entretenimiento, Educación, Servicios"
+
+        system_prompt = system_prompt_template.format(
+            user_context=user_context_json,
+            tool_schemas=tool_schemas_json,
+            pending_context=pending_context_text,
+            available_categories=categories_text,
+        )
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_text},
+        ]
+
+        start = _time.time()
+
+        if provider == "gemini":
+            data = self._call_gemini_json(
+                messages=messages,
+                temperature=self.config.OPENAI_TEMPERATURE_PHASE_A,
+                cid=cid,
+            )
+        else:
+            data = self._call_openai_json(
+                messages=messages,
+                temperature=self.config.OPENAI_TEMPERATURE_PHASE_A,
+                cid=cid,
+            )
+
+        elapsed_ms = round((_time.time() - start) * 1000)
+
+        return {
+            "provider": provider,
+            "model": app_settings.GEMINI_MODEL if provider == "gemini" else self.config.OPENAI_MODEL,
+            "user_text": user_text,
+            "response": data,
+            "elapsed_ms": elapsed_ms,
+        }
 
     def _extract_opening(self, response: str) -> str | None:
         """Extract opening word from response for variability tracking."""

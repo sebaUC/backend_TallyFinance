@@ -73,8 +73,11 @@ export class BotController implements OnModuleInit {
     // Check rate limit (Redis-backed)
     await this.checkRateLimit(msg.externalId, 'whatsapp');
 
+    // Download media attachments (photos, voice, documents)
+    await this.wa.downloadMedia(body, msg);
+
     try {
-      this.log.debug(`[WA] DomainMessage=${JSON.stringify(msg)}`);
+      this.log.debug(`[WA] DomainMessage text="${msg.text}" media=${msg.media?.length ?? 0}`);
       this.log.debug(
         `[WA] Entregando mensaje ${msg.platformMessageId} a BotService`,
       );
@@ -103,8 +106,11 @@ export class BotController implements OnModuleInit {
     // Check rate limit (Redis-backed)
     await this.checkRateLimit(msg.externalId, 'telegram');
 
+    // Download media attachments (photos, voice, documents)
+    await this.tg.downloadMedia(body, msg);
+
     try {
-      this.log.debug(`[TG] DomainMessage=${JSON.stringify(msg)}`);
+      this.log.debug(`[TG] DomainMessage text="${msg.text}" media=${msg.media?.length ?? 0}`);
       this.log.debug(
         `[TG] Entregando mensaje ${msg.platformMessageId} a BotService`,
       );

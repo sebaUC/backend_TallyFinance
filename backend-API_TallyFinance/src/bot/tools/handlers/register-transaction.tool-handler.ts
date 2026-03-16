@@ -50,7 +50,7 @@ export class RegisterTransactionToolHandler implements ToolHandler {
           description: 'Nombre corto de la transacción',
         },
       },
-      required: ['amount', 'category'],
+      required: ['amount'],
     },
   };
 
@@ -100,7 +100,11 @@ export class RegisterTransactionToolHandler implements ToolHandler {
       };
     }
 
-    if (!category) {
+    // For income: category is optional — register without it if missing
+    const txType = type ?? 'expense';
+    const isIncome = txType === 'income';
+
+    if (!category && !isIncome) {
       return {
         ok: true,
         action: 'register_transaction',
@@ -145,7 +149,7 @@ export class RegisterTransactionToolHandler implements ToolHandler {
       categories = dbCategories as Array<{ id: string; name: string }>;
     }
 
-    if (!categories?.length) {
+    if (!categories?.length && !isIncome) {
       return {
         ok: true,
         action: 'register_transaction',
@@ -155,11 +159,13 @@ export class RegisterTransactionToolHandler implements ToolHandler {
     }
 
     // 4. Match category: trust LLM output first, lightweight fallback
-    const matched = this.findBestCategoryMatch(String(category), categories);
+    const matched = category
+      ? this.findBestCategoryMatch(String(category), categories ?? [])
+      : null;
 
-    if (!matched) {
+    if (!matched && !isIncome) {
       // No match found - show user their category list
-      const suggestions = categories.map((c) => `• ${c.name}`).join('\n');
+      const suggestions = (categories ?? []).map((c) => `• ${c.name}`).join('\n');
 
       // If AI sent a specific name (not _no_match), offer to create it
       if (category !== '_no_match') {
@@ -229,13 +235,12 @@ export class RegisterTransactionToolHandler implements ToolHandler {
 
     // 5. Insert transaction
     const parsedAmount = Number(amount);
-    const txType = type ?? 'expense';
     const { data: inserted, error } = await this.supabase
       .from('transactions')
       .insert({
         user_id: userId,
         amount: parsedAmount,
-        category_id: matched.id,
+        category_id: matched?.id ?? null,
         posted_at: postedAt,
         description: description ?? null,
         account_id: accountId,
@@ -278,7 +283,7 @@ export class RegisterTransactionToolHandler implements ToolHandler {
       data: {
         transaction_id: inserted?.id,
         amount: parsedAmount,
-        category: matched.name,
+        category: matched?.name ?? null,
         posted_at: postedAt,
         description: description ?? null,
         account_id: accountId,

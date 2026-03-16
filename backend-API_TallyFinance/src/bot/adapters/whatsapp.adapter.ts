@@ -1,7 +1,7 @@
 import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
-import { DomainMessage } from '../contracts';
+import { DomainMessage, MediaAttachment, MediaType } from '../contracts';
 
 @Injectable()
 export class WhatsappAdapter {
@@ -13,20 +13,124 @@ export class WhatsappAdapter {
   fromIncoming(body: any): DomainMessage | null {
     const change = body?.entry?.[0]?.changes?.[0];
     const msg = change?.value?.messages?.[0];
-    if (!msg?.text?.body) return null;
+    if (!msg) return null;
+
+    // Accept text, image, audio, or document messages
+    const hasText = Boolean(msg.text?.body);
+    const hasMedia = Boolean(msg.image || msg.audio || msg.voice || msg.document);
+
+    if (!hasText && !hasMedia) return null;
 
     const domainMessage: DomainMessage = {
       channel: 'whatsapp',
       externalId: msg.from, // phone
       platformMessageId: msg.id, // wamid
-      text: msg.text.body,
+      text: msg.text?.body ?? msg.image?.caption ?? '',
       timestamp: new Date(Number(msg.timestamp) * 1000).toISOString(),
       profileHint: { displayName: change?.value?.contacts?.[0]?.profile?.name },
     };
     this.log.debug(
-      `[fromIncoming] WA message ${domainMessage.platformMessageId} text="${domainMessage.text}"`,
+      `[fromIncoming] WA message ${domainMessage.platformMessageId} text="${domainMessage.text}" hasMedia=${hasMedia}`,
     );
     return domainMessage;
+  }
+
+  /**
+   * Download media from a WhatsApp message and attach as base64.
+   */
+  async downloadMedia(body: any, dm: DomainMessage): Promise<void> {
+    const change = body?.entry?.[0]?.changes?.[0];
+    const msg = change?.value?.messages?.[0];
+    if (!msg) return;
+
+    const token = this.cfg.get<string>('WHATSAPP_TOKEN');
+    const base = this.cfg.get<string>('WHATSAPP_GRAPH_API_BASE');
+    const v = this.cfg.get<string>('WHATSAPP_GRAPH_API_VERSION');
+    if (!token || !base || !v) return;
+
+    const media: MediaAttachment[] = [];
+
+    // Image
+    if (msg.image) {
+      const attachment = await this.downloadWhatsAppMedia(
+        token, base, v, msg.image.id, 'image', msg.image.mime_type || 'image/jpeg',
+      );
+      if (attachment) media.push(attachment);
+    }
+
+    // Voice (ogg/opus)
+    if (msg.voice) {
+      const attachment = await this.downloadWhatsAppMedia(
+        token, base, v, msg.voice.id, 'audio', msg.voice.mime_type || 'audio/ogg',
+      );
+      if (attachment) media.push(attachment);
+    }
+
+    // Audio
+    if (msg.audio) {
+      const attachment = await this.downloadWhatsAppMedia(
+        token, base, v, msg.audio.id, 'audio', msg.audio.mime_type || 'audio/mpeg',
+      );
+      if (attachment) media.push(attachment);
+    }
+
+    // Document
+    if (msg.document) {
+      const attachment = await this.downloadWhatsAppMedia(
+        token, base, v, msg.document.id, 'document',
+        msg.document.mime_type || 'application/octet-stream',
+        msg.document.filename,
+      );
+      if (attachment) media.push(attachment);
+    }
+
+    if (media.length) {
+      dm.media = media;
+      this.log.log(
+        `[downloadMedia] Downloaded ${media.length} attachment(s): ${media.map((m) => m.type).join(', ')}`,
+      );
+    }
+  }
+
+  private async downloadWhatsAppMedia(
+    token: string,
+    base: string,
+    version: string,
+    mediaId: string,
+    type: MediaType,
+    mimeType: string,
+    fileName?: string,
+  ): Promise<MediaAttachment | null> {
+    try {
+      // Step 1: Get download URL
+      const urlRes = await axios.get(`${base}/${version}/${mediaId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: 10_000,
+      });
+      const downloadUrl = urlRes.data?.url;
+      if (!downloadUrl) return null;
+
+      // Step 2: Download bytes
+      const response = await axios.get(downloadUrl, {
+        headers: { Authorization: `Bearer ${token}` },
+        responseType: 'arraybuffer',
+        timeout: 30_000,
+      });
+
+      const base64 = Buffer.from(response.data).toString('base64');
+
+      if (base64.length > 10 * 1024 * 1024 * 1.37) {
+        this.log.warn(`[downloadWhatsAppMedia] File too large, skipping`);
+        return null;
+      }
+
+      return { type, mimeType, data: base64, fileName };
+    } catch (err) {
+      this.log.warn(
+        `[downloadWhatsAppMedia] Failed to download ${type}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
   }
 
   async sendReply(dm: DomainMessage, text: string) {

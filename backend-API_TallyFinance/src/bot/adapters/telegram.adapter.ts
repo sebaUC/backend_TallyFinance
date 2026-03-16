@@ -7,7 +7,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import axios, { AxiosError } from 'axios';
 import { Agent } from 'https';
-import { DomainMessage } from '../contracts';
+import { DomainMessage, MediaAttachment, MediaType } from '../contracts';
 
 // Force IPv4 to avoid timeout issues in Docker
 const httpsAgent = new Agent({ family: 4 });
@@ -19,8 +19,17 @@ export class TelegramAdapter {
 
   fromIncoming(body: any): DomainMessage | null {
     const msg = body?.message ?? body?.edited_message ?? body?.channel_post;
-    if (!msg?.text) {
-      this.log.debug('Telegram update sin texto procesable');
+    if (!msg) {
+      this.log.debug('Telegram update sin mensaje procesable');
+      return null;
+    }
+
+    // Accept messages with text, photo, voice, audio, or document
+    const hasText = Boolean(msg.text || msg.caption);
+    const hasMedia = Boolean(msg.photo || msg.voice || msg.audio || msg.document);
+
+    if (!hasText && !hasMedia) {
+      this.log.debug('Telegram update sin contenido procesable');
       return null;
     }
 
@@ -28,7 +37,7 @@ export class TelegramAdapter {
       channel: 'telegram',
       externalId: String(msg.chat?.id),
       platformMessageId: String(msg.message_id),
-      text: String(msg.text ?? '').trim(),
+      text: String(msg.text ?? msg.caption ?? '').trim(),
       timestamp: new Date((msg.date ?? Date.now() / 1000) * 1000).toISOString(),
       profileHint: {
         displayName: msg.from?.first_name,
@@ -36,9 +45,118 @@ export class TelegramAdapter {
       },
     };
     this.log.debug(
-      `[fromIncoming] TG message ${domainMessage.platformMessageId} text="${domainMessage.text}"`,
+      `[fromIncoming] TG message ${domainMessage.platformMessageId} text="${domainMessage.text}" hasMedia=${hasMedia}`,
     );
     return domainMessage;
+  }
+
+  /**
+   * Download media from a Telegram message and attach as base64.
+   * Call this after fromIncoming() to enrich the DomainMessage.
+   */
+  async downloadMedia(body: any, dm: DomainMessage): Promise<void> {
+    const msg = body?.message ?? body?.edited_message ?? body?.channel_post;
+    if (!msg) return;
+
+    const token = this.cfg.get<string>('TELEGRAM_BOT_TOKEN');
+    if (!token) return;
+
+    const media: MediaAttachment[] = [];
+
+    // Photo: array of sizes, pick the largest
+    if (msg.photo?.length) {
+      const largest = msg.photo[msg.photo.length - 1];
+      const attachment = await this.downloadTelegramFile(
+        token,
+        largest.file_id,
+        'image',
+        'image/jpeg',
+      );
+      if (attachment) media.push(attachment);
+    }
+
+    // Voice message (ogg/opus)
+    if (msg.voice) {
+      const attachment = await this.downloadTelegramFile(
+        token,
+        msg.voice.file_id,
+        'audio',
+        msg.voice.mime_type || 'audio/ogg',
+      );
+      if (attachment) media.push(attachment);
+    }
+
+    // Audio file (mp3, etc.)
+    if (msg.audio) {
+      const attachment = await this.downloadTelegramFile(
+        token,
+        msg.audio.file_id,
+        'audio',
+        msg.audio.mime_type || 'audio/mpeg',
+      );
+      if (attachment) media.push(attachment);
+    }
+
+    // Document (PDF, etc.)
+    if (msg.document) {
+      const mime = msg.document.mime_type || 'application/octet-stream';
+      const attachment = await this.downloadTelegramFile(
+        token,
+        msg.document.file_id,
+        'document',
+        mime,
+        msg.document.file_name,
+      );
+      if (attachment) media.push(attachment);
+    }
+
+    if (media.length) {
+      dm.media = media;
+      this.log.log(
+        `[downloadMedia] Downloaded ${media.length} attachment(s): ${media.map((m) => m.type).join(', ')}`,
+      );
+    }
+  }
+
+  private async downloadTelegramFile(
+    token: string,
+    fileId: string,
+    type: MediaType,
+    mimeType: string,
+    fileName?: string,
+  ): Promise<MediaAttachment | null> {
+    try {
+      // Step 1: Get file path from Telegram
+      const fileInfo = await axios.get(
+        `https://api.telegram.org/bot${token}/getFile?file_id=${fileId}`,
+        { timeout: 10_000, httpsAgent },
+      );
+      const filePath = fileInfo.data?.result?.file_path;
+      if (!filePath) return null;
+
+      // Step 2: Download file bytes
+      const fileUrl = `https://api.telegram.org/file/bot${token}/${filePath}`;
+      const response = await axios.get(fileUrl, {
+        responseType: 'arraybuffer',
+        timeout: 30_000,
+        httpsAgent,
+      });
+
+      const base64 = Buffer.from(response.data).toString('base64');
+
+      // Limit: skip files > 10MB
+      if (base64.length > 10 * 1024 * 1024 * 1.37) {
+        this.log.warn(`[downloadTelegramFile] File too large, skipping: ${filePath}`);
+        return null;
+      }
+
+      return { type, mimeType, data: base64, fileName };
+    } catch (err) {
+      this.log.warn(
+        `[downloadTelegramFile] Failed to download ${type}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
   }
 
   async sendReply(

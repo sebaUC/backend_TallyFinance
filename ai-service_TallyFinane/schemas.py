@@ -137,6 +137,14 @@ class ConversationMessage(BaseModel):
     content: str
 
 
+class MediaPayload(BaseModel):
+    """Media attachment (image, audio, document) as base64."""
+    type: str  # image, audio, document
+    mime_type: str  # image/jpeg, audio/ogg, application/pdf
+    data: str  # base64-encoded bytes
+    file_name: Optional[str] = None
+
+
 class OrchestrateRequestPhaseA(BaseModel):
     """
     Phase A request: Analyze user text and determine action.
@@ -145,12 +153,10 @@ class OrchestrateRequestPhaseA(BaseModel):
     user_text: str
     user_context: MinimalUserContext
     tools: List[ToolSchema]
-    # NEW: Slot-filling context from previous turn
     pending: Optional[PendingSlotContext] = None
-    # NEW: User's actual category names for matching
     available_categories: List[str] = Field(default_factory=list)
-    # Tier 1: Conversation history (last N exchanges)
     conversation_history: List[ConversationMessage] = Field(default_factory=list)
+    media: List[MediaPayload] = Field(default_factory=list)
 
 
 class OrchestrateResponsePhaseA(BaseModel):

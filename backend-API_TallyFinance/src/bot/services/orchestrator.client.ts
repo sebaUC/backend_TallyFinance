@@ -91,6 +91,7 @@ export class OrchestratorClient {
     pending?: PendingSlotContext | null,
     availableCategories?: string[],
     conversationHistory?: ConversationMessage[],
+    media?: Array<{ type: string; mimeType: string; data: string; fileName?: string }>,
   ): Promise<PhaseAResponse> {
     const baseUrl = this.cfg.get<string>('AI_SERVICE_URL');
 
@@ -98,6 +99,13 @@ export class OrchestratorClient {
       this.log.warn('[phaseA] AI_SERVICE_URL not configured, using stub');
       return this.stubPhaseA(userText, pending, availableCategories);
     }
+
+    const mediaPayload = media?.map((m) => ({
+      type: m.type,
+      mime_type: m.mimeType,
+      data: m.data,
+      file_name: m.fileName,
+    }));
 
     const request: PhaseARequest = {
       phase: 'A',
@@ -108,6 +116,7 @@ export class OrchestratorClient {
       pending: pending ?? null,
       available_categories: availableCategories ?? [],
       conversation_history: conversationHistory ?? [],
+      ...(mediaPayload?.length ? { media: mediaPayload } : {}),
     };
 
     // Determine timeout based on cold start likelihood

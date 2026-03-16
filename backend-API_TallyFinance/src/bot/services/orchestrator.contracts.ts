@@ -1,5 +1,13 @@
 import { ToolSchema } from '../tools/tool-schemas';
 import { ActionResult } from '../actions/action-result';
+import { MediaAttachment } from '../contracts';
+
+export interface MediaPayload {
+  type: string; // image, audio, document
+  mime_type: string;
+  data: string; // base64
+  file_name?: string;
+}
 
 export interface AiUserContextPayload {
   user_id: string;
@@ -43,12 +51,10 @@ export interface PhaseARequest {
   user_text: string;
   user_context: AiUserContextPayload;
   tools: ToolSchema[];
-  // NEW: Pending slot-fill context for multi-turn completion
   pending?: PendingSlotContext | null;
-  // NEW: Available categories for matching
   available_categories?: string[];
-  // Tier 1: Conversation history (last N exchanges)
   conversation_history?: ConversationMessage[];
+  media?: MediaPayload[];
 }
 
 export type PhaseAResponseType = 'tool_call' | 'clarification' | 'direct_reply';

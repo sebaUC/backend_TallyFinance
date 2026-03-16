@@ -219,6 +219,7 @@ export class BotService {
         pendingContext,
         availableCategories,
         history,
+        m.media,
       );
       metrics.phaseAMs = Date.now() - startTotal - metrics.contextMs;
       phaseATimer();
