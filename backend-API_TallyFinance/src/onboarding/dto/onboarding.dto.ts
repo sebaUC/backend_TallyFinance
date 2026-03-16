@@ -141,6 +141,14 @@ class PaymentMethodDto {
   number_masked?: string;
 }
 
+class IncomeExpectationDto {
+  @IsString()
+  period: string;
+
+  @IsString()
+  amount: string;
+}
+
 export class OnboardingAnswers {
   @IsEnum(notificationLevels)
   notifications: NotificationLevel;
@@ -151,6 +159,15 @@ export class OnboardingAnswers {
   @ValidateNested()
   @Type(() => PersonalityDto)
   personality: PersonalityDto;
+
+  @IsOptional()
+  @IsBoolean()
+  noIncome?: boolean;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => IncomeExpectationDto)
+  incomeExpectations?: IncomeExpectationDto;
 
   @IsObject()
   @ValidateNested()
