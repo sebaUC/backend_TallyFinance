@@ -42,7 +42,6 @@ class ToolCall(BaseModel):
 class Personality(BaseModel):
     """Maps to personality_snapshot table."""
     tone: ToneType
-    intensity: float  # 0.0 - 1.0
     mood: Optional[MoodType] = None  # Optional for backward compatibility
 
 
