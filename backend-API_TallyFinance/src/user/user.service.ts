@@ -100,6 +100,82 @@ export class UsersService {
     return { ...data, age: patch.age };
   }
 
+  async adjustBalance(userId: string, newBalance: number) {
+    // 1. Get default account
+    const { data: account, error: accError } = await this.supabase
+      .from('accounts')
+      .select('id, current_balance')
+      .eq('user_id', userId)
+      .limit(1)
+      .maybeSingle();
+
+    if (accError) throw new Error(accError.message);
+    if (!account) throw new Error('No account found. Complete onboarding first.');
+
+    const currentBalance = Number(account.current_balance) || 0;
+    const delta = newBalance - currentBalance;
+
+    if (delta === 0) return { adjusted: false, balance: currentBalance };
+
+    // 2. Create adjustment transaction
+    const txType = delta > 0 ? 'income' : 'expense';
+    const amount = Math.abs(delta);
+    const now = new Date().toISOString();
+
+    const { data: tx, error: txError } = await this.supabase
+      .from('transactions')
+      .insert({
+        user_id: userId,
+        amount,
+        account_id: account.id,
+        posted_at: now,
+        type: txType,
+        name: 'Ajuste de balance',
+        description: `Ajuste de balance: ${currentBalance} → ${newBalance}`,
+        source: 'manual',
+        status: 'posted',
+      })
+      .select('id')
+      .single();
+
+    if (txError) throw new Error(txError.message);
+
+    // 3. Update account balance via RPC
+    await this.supabase.rpc('update_account_balance', {
+      p_account_id: account.id,
+      p_delta: delta,
+    });
+
+    return { adjusted: true, balance: newBalance, transactionId: tx.id, delta };
+  }
+
+  async resetTransactions(userId: string) {
+    // 1. Delete all transactions
+    const { error: txError } = await this.supabase
+      .from('transactions')
+      .delete()
+      .eq('user_id', userId);
+
+    if (txError) throw new Error(txError.message);
+
+    // 2. Reset all account balances to 0
+    const { data: accounts, error: accError } = await this.supabase
+      .from('accounts')
+      .select('id')
+      .eq('user_id', userId);
+
+    if (!accError && accounts?.length) {
+      for (const acc of accounts) {
+        await this.supabase
+          .from('accounts')
+          .update({ current_balance: 0 })
+          .eq('id', acc.id);
+      }
+    }
+
+    return { reset: true, deletedFrom: 'transactions', accountsReset: accounts?.length || 0 };
+  }
+
   async getTransactions(userId: string, limit = 50) {
     // Fetch transactions with joined category and payment method names
     const { data, error } = await this.supabase
