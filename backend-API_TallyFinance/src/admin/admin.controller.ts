@@ -161,12 +161,12 @@ export class AdminController {
   }
 
   /**
-   * GET /admin/usage/per-user
-   * Returns estimated token usage and cost per user
+   * GET /admin/usage/per-user?month=2026-03
+   * Returns estimated token usage and cost per user, filtered by month
    */
   @Get('usage/per-user')
-  async getUsagePerUser() {
-    const data = await this.messagesService.getUsagePerUser();
+  async getUsagePerUser(@Query('month') month?: string) {
+    const data = await this.messagesService.getUsagePerUser(month);
     return {
       ok: true,
       data,

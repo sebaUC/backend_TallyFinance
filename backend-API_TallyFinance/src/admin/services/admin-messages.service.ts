@@ -194,7 +194,7 @@ export class AdminMessagesService {
     };
   }
 
-  async getUsagePerUser(): Promise<
+  async getUsagePerUser(month?: string): Promise<
     Array<{
       user_id: string;
       email: string | null;
@@ -207,7 +207,16 @@ export class AdminMessagesService {
       last_message_at: string;
     }>
   > {
-    // Fetch all messages with phase debug info to determine which phases ran
+    // Calculate date range for month filter
+    let fromDate: string | null = null;
+    let toDate: string | null = null;
+    if (month && /^\d{4}-\d{2}$/.test(month)) {
+      const [year, mon] = month.split('-').map(Number);
+      fromDate = new Date(year, mon - 1, 1).toISOString();
+      toDate = new Date(year, mon, 1).toISOString(); // first day of next month
+    }
+
+    // Fetch messages with phase debug info
     const PAGE_SIZE = 1000;
     let allMessages: Array<{
       user_id: string;
@@ -219,12 +228,16 @@ export class AdminMessagesService {
     let hasMore = true;
 
     while (hasMore) {
-      const { data: page, error } = await this.supabase
+      let query = this.supabase
         .from('bot_message_log')
         .select('user_id, phase_a_debug, phase_b_debug, created_at')
         .not('user_id', 'is', null)
-        .order('created_at', { ascending: false })
-        .range(offset, offset + PAGE_SIZE - 1);
+        .order('created_at', { ascending: false });
+
+      if (fromDate) query = query.gte('created_at', fromDate);
+      if (toDate) query = query.lt('created_at', toDate);
+
+      const { data: page, error } = await query.range(offset, offset + PAGE_SIZE - 1);
 
       if (error) throw new Error('Failed to fetch usage data');
       allMessages = allMessages.concat(page || []);
