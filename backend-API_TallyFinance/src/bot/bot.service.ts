@@ -422,6 +422,20 @@ export class BotService {
       };
 
       // 12. Phase B: AI generates personalized response
+      // For media messages, build a descriptive user_text for Phase B
+      // instead of the raw empty text or technical transcription prompt
+      let phaseBUserText = m.text;
+      if (m.media?.length && (!m.text || m.text.startsWith('IMPORTANTE:'))) {
+        const args = toolCall.args;
+        if (toolCall.name === 'register_transaction' && args.amount) {
+          const cat = args.category || '';
+          const name = args.name || '';
+          phaseBUserText = `Registrar $${args.amount} en ${cat}${name ? ` (${name})` : ''}`;
+        } else {
+          phaseBUserText = `[Mensaje de voz/imagen procesado]`;
+        }
+      }
+
       const phaseBTimer = this.log.timer('Phase B', cid);
       let phaseB;
       try {
@@ -430,7 +444,7 @@ export class BotService {
           result,
           context,
           runtimeContext,
-          m.text,
+          phaseBUserText,
           history,
         );
       } catch (phaseBError) {
