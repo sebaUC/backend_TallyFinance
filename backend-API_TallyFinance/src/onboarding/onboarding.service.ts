@@ -265,6 +265,8 @@ export class OnboardingService {
     // Clean existing accounts
     await this.supabase.from('accounts').delete().eq('user_id', userId);
 
+    const initialBalance = Number(answers.initialBalance) || 0;
+
     if (unifiedBalance || !paymentMethods.length) {
       // Create a single unified account
       const accountId = randomUUID();
@@ -274,7 +276,7 @@ export class OnboardingService {
         name: 'Cuenta Principal',
         institution: null,
         currency: 'CLP',
-        current_balance: 0,
+        current_balance: initialBalance,
       });
 
       if (error) {
@@ -300,6 +302,7 @@ export class OnboardingService {
       const key = (method.institution ?? 'default').toLowerCase();
       if (!institutionMap.has(key)) {
         const accountId = randomUUID();
+        const isFirst = accountIds.length === 0;
         const { error } = await this.supabase.from('accounts').insert({
           id: accountId,
           user_id: userId,
@@ -308,7 +311,7 @@ export class OnboardingService {
             : 'Cuenta Principal',
           institution: method.institution ?? null,
           currency: method.currency ?? 'CLP',
-          current_balance: 0,
+          current_balance: isFirst ? initialBalance : 0,
         });
 
         if (error) {

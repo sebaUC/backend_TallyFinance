@@ -215,6 +215,12 @@ export class OnboardingAnswers {
   @ArrayMaxSize(20)
   @Type(() => PaymentMethodDto)
   payment_method?: PaymentMethodDto[];
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  initialBalance?: number;
 }
 
 export class OnboardingDto {
