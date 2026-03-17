@@ -458,19 +458,31 @@ IMPORTANTE: Combina los args recolectados con lo nuevo del usuario."""
         # Count actions in summary for session depth awareness
         session_action_count = len([s for s in conv_summary.split('.') if s.strip()]) if conv_summary else 0
 
+        # Resolve user name for personalization
+        user_name = user_context.display_name or ""
+
+        # Escape curly braces in dynamic data to prevent .format() KeyError
+        # (tool results may contain {name}, {amount}, etc.)
+        safe_data = data_json.replace("{", "{{").replace("}", "}}")
+        safe_app_knowledge = app_knowledge_json.replace("{", "{{").replace("}", "}}")
+        safe_budget = budget_json.replace("{", "{{").replace("}", "}}")
+        safe_error = error_info.replace("{", "{{").replace("}", "}}")
+        safe_ai_instruction = ai_instruction.replace("{", "{{").replace("}", "}}")
+
         system_prompt = f"""{gus_identity}
 
 {system_prompt_template.format(
     tone=tone,
     mood=final_mood,
+    user_name=user_name or "desconocido",
     tool_name=tool_name,
     ok=action_result.ok,
-    data=data_json,
+    data=safe_data,
     user_question=user_question,
-    app_knowledge=app_knowledge_json,
-    ai_instruction=ai_instruction,
-    error_info=error_info,
-    active_budget=budget_json,
+    app_knowledge=safe_app_knowledge,
+    ai_instruction=safe_ai_instruction,
+    error_info=safe_error,
+    active_budget=safe_budget,
     goals_summary=goals_summary,
 )}
 
