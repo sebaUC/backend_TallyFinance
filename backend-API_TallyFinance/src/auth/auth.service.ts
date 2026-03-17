@@ -88,6 +88,8 @@ export class AuthService {
     const { error: insertError } = await this.supabase.from('users').upsert(
       {
         id: user.id,
+        email: dto.email,
+        full_name: fullName,
         package: defaults.package,
         is_active: true,
         created_at: now,
