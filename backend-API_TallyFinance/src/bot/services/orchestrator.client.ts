@@ -415,6 +415,7 @@ export class OrchestratorClient {
   private buildAiUserContext(context: MinimalUserContext) {
     return {
       user_id: context.userId,
+      display_name: context.displayName ?? null,
       personality: context.personality
         ? {
             tone: context.personality.tone ?? null,

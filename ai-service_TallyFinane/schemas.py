@@ -75,6 +75,7 @@ class MinimalUserContext(BaseModel):
     Aggregated from multiple Supabase tables.
     """
     user_id: str
+    display_name: Optional[str] = None  # Nickname or full_name
     personality: Optional[Personality] = None  # From personality_snapshot
     prefs: Optional[UserPrefs] = None  # From user_prefs
     active_budget: Optional[Budget] = None  # From spending_expectations WHERE active=true

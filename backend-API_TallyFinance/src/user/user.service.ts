@@ -69,15 +69,15 @@ export class UsersService {
     const metadataPatch: Record<string, any> = {};
 
     if (patch.full_name !== undefined) {
-      tablePatch.full_name = patch.full_name;
-      metadataPatch.full_name = patch.full_name;
+      tablePatch.full_name = patch.full_name || null;
+      metadataPatch.full_name = patch.full_name || null;
     }
     if (patch.nickname !== undefined) {
-      tablePatch.nickname = patch.nickname;
-      metadataPatch.nickname = patch.nickname;
+      tablePatch.nickname = patch.nickname || null;
+      metadataPatch.nickname = patch.nickname || null;
     }
     if (patch.age !== undefined) {
-      metadataPatch.age = patch.age;
+      metadataPatch.age = patch.age || null;
     }
 
     // Update public.users table
@@ -104,7 +104,7 @@ export class UsersService {
     // 1. Get default account
     const { data: account, error: accError } = await this.supabase
       .from('accounts')
-      .select('id, current_balance')
+      .select('id')
       .eq('user_id', userId)
       .limit(1)
       .maybeSingle();
@@ -112,41 +112,41 @@ export class UsersService {
     if (accError) throw new Error(accError.message);
     if (!account) throw new Error('No account found. Complete onboarding first.');
 
-    const currentBalance = Number(account.current_balance) || 0;
-    const delta = newBalance - currentBalance;
-
-    if (delta === 0) return { adjusted: false, balance: currentBalance };
-
-    // 2. Create adjustment transaction
-    const txType = delta > 0 ? 'income' : 'expense';
-    const amount = Math.abs(delta);
-    const now = new Date().toISOString();
-
-    const { data: tx, error: txError } = await this.supabase
+    // 2. Delete all existing transactions
+    const { error: delError } = await this.supabase
       .from('transactions')
-      .insert({
-        user_id: userId,
-        amount,
-        account_id: account.id,
-        posted_at: now,
-        type: txType,
-        name: 'Ajuste de balance',
-        description: `Ajuste de balance: ${currentBalance} → ${newBalance}`,
-        source: 'manual',
-        status: 'posted',
-      })
-      .select('id')
-      .single();
+      .delete()
+      .eq('user_id', userId);
 
-    if (txError) throw new Error(txError.message);
+    if (delError) throw new Error(delError.message);
 
-    // 3. Update account balance via RPC
-    await this.supabase.rpc('update_account_balance', {
-      p_account_id: account.id,
-      p_delta: delta,
-    });
+    // 3. Set account balance directly
+    const { error: updError } = await this.supabase
+      .from('accounts')
+      .update({ current_balance: newBalance, updated_at: new Date().toISOString() })
+      .eq('id', account.id);
 
-    return { adjusted: true, balance: newBalance, transactionId: tx.id, delta };
+    if (updError) throw new Error(updError.message);
+
+    // 4. Create single income transaction for the full balance (shows in balance view)
+    if (newBalance > 0) {
+      const { error: txError } = await this.supabase
+        .from('transactions')
+        .insert({
+          user_id: userId,
+          amount: newBalance,
+          account_id: account.id,
+          posted_at: new Date().toISOString(),
+          type: 'income',
+          name: 'Balance inicial',
+          source: 'manual',
+          status: 'posted',
+        });
+
+      if (txError) throw new Error(txError.message);
+    }
+
+    return { adjusted: true, balance: newBalance };
   }
 
   async resetTransactions(userId: string) {

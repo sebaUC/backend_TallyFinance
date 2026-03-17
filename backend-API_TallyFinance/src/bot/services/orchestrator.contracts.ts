@@ -11,6 +11,7 @@ export interface MediaPayload {
 
 export interface AiUserContextPayload {
   user_id: string;
+  display_name: string | null;
   personality: {
     tone: string | null;
     mood: string | null;
