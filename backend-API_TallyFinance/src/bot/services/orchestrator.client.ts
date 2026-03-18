@@ -392,7 +392,7 @@ export class OrchestratorClient {
   private isValidPhaseAResponse(data: any): data is PhaseAResponse {
     if (!data || data.phase !== 'A') return false;
     if (
-      !['tool_call', 'clarification', 'direct_reply'].includes(
+      !['tool_call', 'clarification', 'direct_reply', 'actions'].includes(
         data.response_type,
       )
     )
@@ -403,6 +403,11 @@ export class OrchestratorClient {
     if (data.response_type === 'clarification' && !data.clarification)
       return false;
     if (data.response_type === 'direct_reply' && !data.direct_reply)
+      return false;
+    if (
+      data.response_type === 'actions' &&
+      (!Array.isArray(data.actions) || data.actions.length === 0)
+    )
       return false;
 
     return true;

@@ -160,15 +160,27 @@ class OrchestrateRequestPhaseA(BaseModel):
     media: List[MediaPayload] = Field(default_factory=list)
 
 
+class PhaseAActionItem(BaseModel):
+    """A single action item in a multi-action response from Phase A."""
+    id: int
+    tool: str
+    args: Dict[str, Any] = Field(default_factory=dict)
+    status: Literal["ready", "needs_info", "depends_on"] = "ready"
+    missing: Optional[List[str]] = None
+    question: Optional[str] = None
+    depends_on: Optional[int] = None  # id of item that must execute first
+
+
 class OrchestrateResponsePhaseA(BaseModel):
     """
-    Phase A response: Returns tool_call, clarification, or direct_reply.
+    Phase A response: Returns tool_call, clarification, direct_reply, or actions.
     """
     phase: Literal["A"] = "A"
-    response_type: Literal["tool_call", "clarification", "direct_reply"]
+    response_type: Literal["tool_call", "clarification", "direct_reply", "actions"]
     tool_call: Optional[ToolCall] = None
     clarification: Optional[str] = None
     direct_reply: Optional[str] = None
+    actions: Optional[List[PhaseAActionItem]] = None  # Present when response_type == "actions"
 
 
 # =============================================================================

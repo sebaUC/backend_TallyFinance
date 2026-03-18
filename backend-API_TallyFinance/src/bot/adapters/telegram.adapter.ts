@@ -8,6 +8,7 @@ import { ConfigService } from '@nestjs/config';
 import axios, { AxiosError } from 'axios';
 import { Agent } from 'https';
 import { DomainMessage, MediaAttachment, MediaType } from '../contracts';
+import { BotButton } from '../actions/action-block';
 
 // Force IPv4 to avoid timeout issues in Docker
 const httpsAgent = new Agent({ family: 4 });
@@ -156,6 +157,95 @@ export class TelegramAdapter {
         `[downloadTelegramFile] Failed to download ${type}: ${err instanceof Error ? err.message : String(err)}`,
       );
       return null;
+    }
+  }
+
+  /**
+   * Send a message with optional inline keyboard buttons.
+   * Returns the sent message_id (for later editing).
+   */
+  async sendReplyWithButtons(
+    dm: DomainMessage,
+    text: string,
+    buttons: BotButton[],
+    parseMode?: 'HTML',
+  ): Promise<number | null> {
+    const token = this.cfg.get<string>('TELEGRAM_BOT_TOKEN');
+    if (!token) throw new UnauthorizedException('TELEGRAM_BOT_TOKEN no configurado');
+
+    const url = `https://api.telegram.org/bot${token}/sendMessage`;
+    const inlineKeyboard = [buttons.map((b) => ({ text: b.text, callback_data: b.callbackData }))];
+
+    const payload: any = {
+      chat_id: dm.externalId,
+      text,
+      ...(parseMode ? { parse_mode: parseMode } : {}),
+      reply_markup: { inline_keyboard: inlineKeyboard },
+    };
+
+    try {
+      const res = await axios.post(url, payload, { timeout: 15_000, httpsAgent });
+      const messageId: number = res.data?.result?.message_id;
+
+      // Schedule button removal after expiresIn seconds
+      const expiresIn = buttons[0]?.expiresIn;
+      if (expiresIn && messageId) {
+        setTimeout(() => {
+          this.editMessageRemoveButtons(dm.externalId, messageId).catch(() => {});
+        }, expiresIn * 1000);
+      }
+
+      return messageId ?? null;
+    } catch (err) {
+      this.log.warn(`[sendReplyWithButtons] Failed: ${String(err)}`);
+      // Fallback: send without buttons
+      await this.sendReply(dm, text, { parseMode });
+      return null;
+    }
+  }
+
+  /**
+   * Remove inline keyboard buttons from a message (after undo/expiry).
+   */
+  async editMessageRemoveButtons(chatId: string, messageId: number): Promise<void> {
+    const token = this.cfg.get<string>('TELEGRAM_BOT_TOKEN');
+    if (!token) return;
+
+    const url = `https://api.telegram.org/bot${token}/editMessageReplyMarkup`;
+    try {
+      await axios.post(url, {
+        chat_id: chatId,
+        message_id: messageId,
+        reply_markup: { inline_keyboard: [] },
+      }, { timeout: 5_000, httpsAgent });
+    } catch {
+      // Silently ignore — message may have already been edited or deleted
+    }
+  }
+
+  /**
+   * Edit the text of a message (used after undo to strikethrough).
+   */
+  async editMessageText(
+    chatId: string,
+    messageId: number,
+    newText: string,
+    parseMode?: 'HTML',
+  ): Promise<void> {
+    const token = this.cfg.get<string>('TELEGRAM_BOT_TOKEN');
+    if (!token) return;
+
+    const url = `https://api.telegram.org/bot${token}/editMessageText`;
+    try {
+      await axios.post(url, {
+        chat_id: chatId,
+        message_id: messageId,
+        text: newText,
+        ...(parseMode ? { parse_mode: parseMode } : {}),
+        reply_markup: { inline_keyboard: [] },
+      }, { timeout: 5_000, httpsAgent });
+    } catch {
+      // Silently ignore
     }
   }
 

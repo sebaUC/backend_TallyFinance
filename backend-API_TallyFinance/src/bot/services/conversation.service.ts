@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { RedisService, RedisKeys, RedisTTL } from '../../redis';
+import { ActionBlock } from '../actions/action-block';
 
 /**
  * Pending slot-fill state structure.
@@ -136,6 +137,52 @@ export class ConversationService {
     } catch (err) {
       this.log.warn(`[hasPending] Redis error for user ${userId}`, err);
       return false;
+    }
+  }
+
+  // =========================================================================
+  // ACTION BLOCK: Multi-action pipeline state (JSON)
+  // =========================================================================
+
+  /**
+   * Gets the active ActionBlock for a user.
+   * @returns ActionBlock or null if no active block
+   */
+  async getBlock(userId: string): Promise<ActionBlock | null> {
+    const key = RedisKeys.convBlock(userId);
+    try {
+      const json = await this.redis.get(key);
+      if (!json) return null;
+      return JSON.parse(json) as ActionBlock;
+    } catch (err) {
+      this.log.warn(`[getBlock] Redis error for user ${userId}`, err);
+      return null;
+    }
+  }
+
+  /**
+   * Saves an ActionBlock. TTL: 10 minutes.
+   */
+  async setBlock(userId: string, block: ActionBlock): Promise<void> {
+    const key = RedisKeys.convBlock(userId);
+    try {
+      await this.redis.set(key, JSON.stringify(block), RedisTTL.CONV_BLOCK);
+      this.log.debug(`[setBlock] Saved block ${block.id} for user ${userId} (${block.items.length} items)`);
+    } catch (err) {
+      this.log.warn(`[setBlock] Redis error for user ${userId}`, err);
+    }
+  }
+
+  /**
+   * Clears the active ActionBlock (after completion or explicit cancel).
+   */
+  async clearBlock(userId: string): Promise<void> {
+    const key = RedisKeys.convBlock(userId);
+    try {
+      await this.redis.del(key);
+      this.log.debug(`[clearBlock] Cleared block for user ${userId}`);
+    } catch (err) {
+      this.log.warn(`[clearBlock] Redis error for user ${userId}`, err);
     }
   }
 }

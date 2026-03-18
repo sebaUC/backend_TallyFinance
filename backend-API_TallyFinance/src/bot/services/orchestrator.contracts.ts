@@ -58,11 +58,24 @@ export interface PhaseARequest {
   media?: MediaPayload[];
 }
 
-export type PhaseAResponseType = 'tool_call' | 'clarification' | 'direct_reply';
+export type PhaseAResponseType = 'tool_call' | 'clarification' | 'direct_reply' | 'actions';
 
 export interface ToolCall {
   name: string;
   args: Record<string, any>;
+}
+
+/**
+ * A single action item returned by Phase A in multi-action mode.
+ */
+export interface PhaseAActionItem {
+  id: number;
+  tool: string;
+  args: Record<string, any>;
+  status: 'ready' | 'needs_info' | 'depends_on';
+  missing?: string[];
+  question?: string;
+  depends_on?: number; // id of another item that must execute first
 }
 
 export interface PhaseAResponse {
@@ -71,6 +84,7 @@ export interface PhaseAResponse {
   tool_call?: ToolCall;
   clarification?: string;
   direct_reply?: string;
+  actions?: PhaseAActionItem[]; // Present when response_type === 'actions'
 }
 
 // ============ Phase B ============

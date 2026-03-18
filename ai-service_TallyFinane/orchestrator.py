@@ -15,6 +15,7 @@ from schemas import (
     OrchestrateResponsePhaseA,
     OrchestrateResponsePhaseB,
     PendingSlotContext,
+    PhaseAActionItem,
     RuntimeContext,
     ToolCall,
     ToolSchema,
@@ -330,7 +331,7 @@ IMPORTANTE: Combina los args recolectados con lo nuevo del usuario."""
         response_type = data.get("response_type", "clarification")
 
         # Validate response_type before constructing Pydantic model
-        valid_types = ("tool_call", "clarification", "direct_reply")
+        valid_types = ("tool_call", "clarification", "direct_reply", "actions")
         if response_type not in valid_types:
             log.err(
                 "Invalid response_type from LLM",
@@ -344,6 +345,7 @@ IMPORTANTE: Combina los args recolectados con lo nuevo del usuario."""
         tool_call = None
         clarification = None
         direct_reply = None
+        actions = None
 
         if response_type == "tool_call":
             tool_call_data = data.get("tool_call", {})
@@ -358,6 +360,37 @@ IMPORTANTE: Combina los args recolectados con lo nuevo del usuario."""
         elif response_type == "direct_reply":
             direct_reply = data.get("direct_reply", "¡Hola! ¿En que puedo ayudarte?")
             log.phase_a("Direct reply", {"text": direct_reply[:50]}, cid)
+        elif response_type == "actions":
+            raw_actions = data.get("actions", [])
+            if not isinstance(raw_actions, list) or len(raw_actions) == 0:
+                log.err(
+                    "response_type=actions but no actions array",
+                    {"full_response": data},
+                    cid,
+                )
+                # Fallback to clarification
+                response_type = "clarification"
+                clarification = "No entendí bien. ¿Puedes repetir qué necesitas?"
+            else:
+                actions = []
+                for i, item in enumerate(raw_actions):
+                    try:
+                        actions.append(PhaseAActionItem(
+                            id=item.get("id", i),
+                            tool=item.get("tool", "unknown"),
+                            args=item.get("args", {}),
+                            status=item.get("status", "ready"),
+                            missing=item.get("missing"),
+                            question=item.get("question"),
+                            depends_on=item.get("depends_on"),
+                        ))
+                    except Exception as e:
+                        log.warn(f"Skipping malformed action item {i}: {e}", cid=cid)
+                log.phase_a(
+                    f"Multi-action: {len(actions)} items",
+                    {"tools": [a.tool for a in actions]},
+                    cid,
+                )
 
         return OrchestrateResponsePhaseA(
             phase="A",
@@ -365,6 +398,7 @@ IMPORTANTE: Combina los args recolectados con lo nuevo del usuario."""
             tool_call=tool_call,
             clarification=clarification,
             direct_reply=direct_reply,
+            actions=actions,
         )
 
     def phase_b(

@@ -2,6 +2,7 @@ import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import { DomainMessage, MediaAttachment, MediaType } from '../contracts';
+import { BotButton } from '../actions/action-block';
 
 @Injectable()
 export class WhatsappAdapter {
@@ -133,13 +134,24 @@ export class WhatsappAdapter {
     }
   }
 
-  async sendReply(dm: DomainMessage, text: string) {
+  /** Strip HTML tags for WhatsApp (plain text only). */
+  private stripHtml(text: string): string {
+    return text
+      .replace(/<b>(.*?)<\/b>/gi, '*$1*') // <b> → *bold* (WhatsApp)
+      .replace(/<i>(.*?)<\/i>/gi, '_$1_') // <i> → _italic_
+      .replace(/<[^>]*>/g, '');            // strip remaining tags
+  }
+
+  async sendReply(dm: DomainMessage, text: string, opts?: { parseMode?: 'HTML' }) {
     const token = this.cfg.get<string>('WHATSAPP_TOKEN');
     const phoneNumberId = this.cfg.get<string>('WHATSAPP_PHONE_NUMBER_ID');
     const base = this.cfg.get<string>('WHATSAPP_GRAPH_API_BASE');
     const v = this.cfg.get<string>('WHATSAPP_GRAPH_API_VERSION');
     if (!token || !phoneNumberId || !base || !v)
       throw new UnauthorizedException('WA config missing');
+
+    // WhatsApp doesn't support HTML — convert to WhatsApp markdown
+    const body = opts?.parseMode === 'HTML' ? this.stripHtml(text) : text;
 
     const url = `${base}/${v}/${phoneNumberId}/messages`;
     await axios.post(
@@ -148,7 +160,7 @@ export class WhatsappAdapter {
         messaging_product: 'whatsapp',
         to: dm.externalId,
         type: 'text',
-        text: { preview_url: false, body: text },
+        text: { preview_url: false, body },
       },
       {
         headers: {
@@ -160,5 +172,62 @@ export class WhatsappAdapter {
     );
 
     this.log.log(`WA message sent to ${dm.externalId}`);
+  }
+
+  /**
+   * Send WhatsApp interactive message with up to 3 buttons.
+   * WhatsApp only supports plain text in buttons (no HTML/markdown).
+   */
+  async sendInteractiveReply(
+    dm: DomainMessage,
+    text: string,
+    buttons: BotButton[],
+  ): Promise<void> {
+    const token = this.cfg.get<string>('WHATSAPP_TOKEN');
+    const phoneNumberId = this.cfg.get<string>('WHATSAPP_PHONE_NUMBER_ID');
+    const base = this.cfg.get<string>('WHATSAPP_GRAPH_API_BASE');
+    const v = this.cfg.get<string>('WHATSAPP_GRAPH_API_VERSION');
+    if (!token || !phoneNumberId || !base || !v) {
+      throw new UnauthorizedException('WA config missing');
+    }
+
+    // WhatsApp max 3 buttons per message
+    const waButtons = buttons.slice(0, 3).map((b, i) => ({
+      type: 'reply',
+      reply: {
+        id: b.callbackData.substring(0, 256), // WA max 256 chars
+        title: b.text.substring(0, 20),        // WA max 20 chars
+      },
+    }));
+
+    const body = this.stripHtml(text);
+    const url = `${base}/${v}/${phoneNumberId}/messages`;
+
+    try {
+      await axios.post(
+        url,
+        {
+          messaging_product: 'whatsapp',
+          to: dm.externalId,
+          type: 'interactive',
+          interactive: {
+            type: 'button',
+            body: { text: body.substring(0, 1024) }, // WA max 1024
+            action: { buttons: waButtons },
+          },
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          timeout: 10000,
+        },
+      );
+      this.log.log(`WA interactive message sent to ${dm.externalId}`);
+    } catch (err) {
+      this.log.warn(`[sendInteractiveReply] Failed, falling back to plain: ${String(err)}`);
+      await this.sendReply(dm, text, { parseMode: 'HTML' });
+    }
   }
 }

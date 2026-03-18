@@ -15,6 +15,9 @@ import { StyleDetectorService } from './services/style-detector.service';
 import { OrchestratorClient } from './services/orchestrator.client';
 import { GuardrailsService } from './services/guardrails.service';
 import { MessageLogService } from './services/message-log.service';
+import { ResponseBuilderService } from './services/response-builder.service';
+import { ActionPlannerService } from './services/action-planner.service';
+import { CallbackHandlerService } from './services/callback-handler.service';
 import { ToolRegistry } from './tools/tool-registry';
 
 @Module({
@@ -34,6 +37,9 @@ import { ToolRegistry } from './tools/tool-registry';
     OrchestratorClient,
     GuardrailsService,
     MessageLogService,
+    ResponseBuilderService,
+    ActionPlannerService,
+    CallbackHandlerService,
     ToolRegistry,
   ],
   exports: [
@@ -46,6 +52,8 @@ import { ToolRegistry } from './tools/tool-registry';
     OrchestratorClient,
     GuardrailsService,
     MessageLogService,
+    ResponseBuilderService,
+    ActionPlannerService,
     ToolRegistry,
   ],
 })

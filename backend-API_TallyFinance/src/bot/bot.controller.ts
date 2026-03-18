@@ -11,8 +11,11 @@ import {
 import { BotService } from './bot.service';
 import { WhatsappAdapter } from './adapters/whatsapp.adapter';
 import { TelegramAdapter } from './adapters/telegram.adapter';
+import { CallbackHandlerService } from './services/callback-handler.service';
 import { UserContextService } from './services/user-context.service';
+import { BotChannelService } from './delegates/bot-channel.service';
 import { DomainMessage } from './contracts';
+import { BotReply } from './actions/action-block';
 import {
   AsyncRateLimiter,
   createAsyncRateLimiter,
@@ -37,7 +40,9 @@ export class BotController implements OnModuleInit {
     private readonly bot: BotService,
     private readonly wa: WhatsappAdapter,
     private readonly tg: TelegramAdapter,
+    private readonly callbackHandler: CallbackHandlerService,
     private readonly userContext: UserContextService,
+    private readonly channels: BotChannelService,
     private readonly redis: RedisService,
   ) {}
 
@@ -61,29 +66,90 @@ export class BotController implements OnModuleInit {
     }
   }
 
+  /**
+   * Send all BotReply items via WhatsApp.
+   */
+  private async sendWaReplies(
+    msg: DomainMessage,
+    replies: BotReply[],
+  ): Promise<void> {
+    for (const reply of replies) {
+      if (reply.skipSend || !reply.text) continue;
+      if (reply.buttons?.length) {
+        await this.wa.sendInteractiveReply(msg, reply.text, reply.buttons);
+      } else {
+        await this.wa.sendReply(msg, reply.text, { parseMode: reply.parseMode });
+      }
+    }
+  }
+
+  /**
+   * Send all BotReply items via Telegram.
+   */
+  private async sendTgReplies(
+    msg: DomainMessage,
+    replies: BotReply[],
+  ): Promise<void> {
+    for (const reply of replies) {
+      if (reply.skipSend || !reply.text) continue;
+      if (reply.buttons?.length) {
+        await this.tg.sendReplyWithButtons(
+          msg,
+          reply.text,
+          reply.buttons,
+          reply.parseMode,
+        );
+      } else {
+        await this.tg.sendReply(msg, reply.text, { parseMode: reply.parseMode });
+      }
+    }
+  }
+
   @Post('whatsapp/webhook')
   async whatsapp(@Body() body: any) {
     this.log.debug(`[WA] Webhook body=${JSON.stringify(body)}`);
-    const msg = this.wa.fromIncoming(body);
-    if (!msg) {
+
+    // Handle WhatsApp interactive button reply (callback equivalent)
+    const change = body?.entry?.[0]?.changes?.[0];
+    const msg = change?.value?.messages?.[0];
+    if (msg?.type === 'interactive' && msg?.interactive?.type === 'button_reply') {
+      const callbackData = msg.interactive.button_reply?.id;
+      const phone = msg.from;
+      if (callbackData && phone) {
+        const userId = await this.channels.getUserIdByExternalId(phone, 'whatsapp');
+        if (userId) {
+          const result = await this.callbackHandler.handle(callbackData, userId);
+          if (result) {
+            const domainMsg: DomainMessage = {
+              channel: 'whatsapp',
+              externalId: phone,
+              platformMessageId: msg.id,
+              text: '',
+              timestamp: new Date().toISOString(),
+            };
+            await this.wa.sendReply(domainMsg, result, { parseMode: 'HTML' });
+          }
+        }
+      }
+      return 'EVENT_RECEIVED';
+    }
+
+    const domainMsg = this.wa.fromIncoming(body);
+    if (!domainMsg) {
       this.log.debug('[WA] Evento sin mensaje procesable');
       return 'EVENT_IGNORED';
     }
 
     // Check rate limit (Redis-backed)
-    await this.checkRateLimit(msg.externalId, 'whatsapp');
+    await this.checkRateLimit(domainMsg.externalId, 'whatsapp');
 
     // Download media attachments (photos, voice, documents)
-    await this.wa.downloadMedia(body, msg);
+    await this.wa.downloadMedia(body, domainMsg);
 
     try {
-      this.log.debug(`[WA] DomainMessage text="${msg.text}" media=${msg.media?.length ?? 0}`);
-      this.log.debug(
-        `[WA] Entregando mensaje ${msg.platformMessageId} a BotService`,
-      );
-      const reply = await this.bot.handle(msg);
-      this.log.debug(`[WA] Respuesta lista "${reply}"`);
-      await this.wa.sendReply(msg, reply);
+      this.log.debug(`[WA] DomainMessage text="${domainMsg.text}" media=${domainMsg.media?.length ?? 0}`);
+      const replies = await this.bot.handle(domainMsg);
+      await this.sendWaReplies(domainMsg, replies);
       return 'EVENT_RECEIVED';
     } catch (err) {
       if (err instanceof HttpException) throw err;
@@ -97,26 +163,57 @@ export class BotController implements OnModuleInit {
   @Post('telegram/webhook')
   async telegram(@Body() body: any) {
     this.log.debug(`[TG] Webhook body=${JSON.stringify(body)}`);
-    const msg = this.tg.fromIncoming(body);
-    if (!msg) {
+
+    // Handle Telegram callback_query (button press)
+    if (body?.callback_query) {
+      const cbq = body.callback_query;
+      const callbackData: string = cbq?.data;
+      const chatId = String(cbq?.message?.chat?.id ?? cbq?.from?.id ?? '');
+      const messageId: number = cbq?.message?.message_id;
+
+      if (callbackData && chatId) {
+        // Answer callback to remove loading spinner
+        await this.answerCallbackQuery(cbq.id).catch(() => {});
+
+        const userId = await this.channels.getUserIdByExternalId(chatId, 'telegram');
+        if (userId) {
+          const result = await this.callbackHandler.handle(callbackData, userId);
+          if (result) {
+            const domainMsg: DomainMessage = {
+              channel: 'telegram',
+              externalId: chatId,
+              platformMessageId: String(messageId),
+              text: '',
+              timestamp: new Date().toISOString(),
+            };
+            // Edit the original message to show undo result
+            if (messageId) {
+              await this.tg.editMessageText(chatId, messageId, result, 'HTML').catch(() => {});
+            } else {
+              await this.tg.sendReply(domainMsg, result, { parseMode: 'HTML' });
+            }
+          }
+        }
+      }
+      return 'OK';
+    }
+
+    const domainMsg = this.tg.fromIncoming(body);
+    if (!domainMsg) {
       this.log.debug('[TG] Evento sin mensaje procesable');
       return 'OK';
     }
 
     // Check rate limit (Redis-backed)
-    await this.checkRateLimit(msg.externalId, 'telegram');
+    await this.checkRateLimit(domainMsg.externalId, 'telegram');
 
     // Download media attachments (photos, voice, documents)
-    await this.tg.downloadMedia(body, msg);
+    await this.tg.downloadMedia(body, domainMsg);
 
     try {
-      this.log.debug(`[TG] DomainMessage text="${msg.text}" media=${msg.media?.length ?? 0}`);
-      this.log.debug(
-        `[TG] Entregando mensaje ${msg.platformMessageId} a BotService`,
-      );
-      const reply = await this.bot.handle(msg);
-      this.log.debug(`[TG] Respuesta lista "${reply}"`);
-      await this.tg.sendReply(msg, reply);
+      this.log.debug(`[TG] DomainMessage text="${domainMsg.text}" media=${domainMsg.media?.length ?? 0}`);
+      const replies = await this.bot.handle(domainMsg);
+      await this.sendTgReplies(domainMsg, replies);
       return 'OK';
     } catch (err) {
       if (err instanceof HttpException) throw err;
@@ -124,6 +221,22 @@ export class BotController implements OnModuleInit {
       throw new InternalServerErrorException(
         'Error procesando mensaje de Telegram',
       );
+    }
+  }
+
+  /** Answer Telegram callback_query to remove the loading indicator */
+  private async answerCallbackQuery(callbackQueryId: string): Promise<void> {
+    const token = (this.tg as any).cfg?.get?.('TELEGRAM_BOT_TOKEN');
+    if (!token) return;
+    try {
+      const axios = require('axios');
+      await axios.post(
+        `https://api.telegram.org/bot${token}/answerCallbackQuery`,
+        { callback_query_id: callbackQueryId },
+        { timeout: 5_000 },
+      );
+    } catch {
+      // ignore
     }
   }
 
@@ -147,7 +260,7 @@ export class BotController implements OnModuleInit {
     };
 
     try {
-      const { reply, metrics } = await this.bot.handleTest(
+      const { replies, reply, metrics } = await this.bot.handleTest(
         body.userId,
         testMessage,
       );
@@ -155,6 +268,7 @@ export class BotController implements OnModuleInit {
       const response: any = {
         ok: true,
         reply,
+        replies: replies.map((r) => ({ text: r.text, hasButtons: !!r.buttons?.length })),
         metrics: {
           correlationId: metrics.correlationId,
           totalMs: metrics.totalMs,
