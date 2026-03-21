@@ -18,6 +18,7 @@ import { MessageLogService } from './services/message-log.service';
 import { ResponseBuilderService } from './services/response-builder.service';
 import { ActionPlannerService } from './services/action-planner.service';
 import { CallbackHandlerService } from './services/callback-handler.service';
+import { ConversationLogService } from './services/conversation-log.service';
 import { ToolRegistry } from './tools/tool-registry';
 
 @Module({
@@ -40,6 +41,7 @@ import { ToolRegistry } from './tools/tool-registry';
     ResponseBuilderService,
     ActionPlannerService,
     CallbackHandlerService,
+    ConversationLogService,
     ToolRegistry,
   ],
   exports: [

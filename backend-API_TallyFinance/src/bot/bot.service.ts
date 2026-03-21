@@ -1,9 +1,10 @@
 import { Injectable } from '@nestjs/common';
 import { randomUUID } from 'crypto';
-import { DomainMessage } from './contracts';
+import { DomainMessage, MediaAttachment } from './contracts';
 import { BotChannelService } from './delegates/bot-channel.service';
 import { UserContextService } from './services/user-context.service';
-import { ConversationService } from './services/conversation.service';
+import { ConversationService, SessionSummary } from './services/conversation.service';
+import { ConversationLogService } from './services/conversation-log.service';
 import { ConversationHistoryService } from './services/conversation-history.service';
 import { MetricsService } from './services/metrics.service';
 import { CooldownService } from './services/cooldown.service';
@@ -11,6 +12,7 @@ import { StyleDetectorService } from './services/style-detector.service';
 import { OrchestratorClient } from './services/orchestrator.client';
 import { MessageLogService } from './services/message-log.service';
 import {
+  ConversationMessageMetadata,
   OrchestratorError,
   PhaseAResponse,
   RuntimeContext,
@@ -56,6 +58,7 @@ export class BotService {
     private readonly messageLog: MessageLogService,
     private readonly actionPlanner: ActionPlannerService,
     private readonly responseBuilder: ResponseBuilderService,
+    private readonly conversationLog: ConversationLogService,
   ) {}
 
   async handle(m: DomainMessage): Promise<BotReply[]> {
@@ -121,6 +124,11 @@ export class BotService {
     try {
       const { replies, metrics } = await this.processMessage(cid, userId, m);
 
+      // Bug D fix: ensure at least one reply
+      if (!replies.length || !replies.some(r => !r.skipSend && r.text?.trim())) {
+        replies.push({ text: 'No entendí tu mensaje. ¿Puedes reformularlo?' });
+      }
+
       // SUCCESS: Mark dedup as "done" with 24h TTL
       await this.redis.set(dedupKey, 'done', RedisTTL.MSG_DEDUP_DONE);
 
@@ -180,10 +188,10 @@ export class BotService {
     try {
       // 1. LOAD ALL STATE BEFORE PROCESSING (transaction-like behavior)
       const contextTimer = this.log.timer('Context loaded', cid);
-      const [context, summary, pending, userMetrics, cooldownFlags, history, existingBlock] =
+      const [context, sessionSummary, pending, userMetrics, cooldownFlags, history, existingBlock] =
         await Promise.all([
           this.userContext.getContext(userId),
-          this.conversation.getSummary(userId),
+          this.conversation.getSessionSummary(userId),
           this.conversation.getPending(userId),
           this.metricsService.getMetrics(userId),
           this.cooldowns.getCooldownFlags(userId),
@@ -211,6 +219,30 @@ export class BotService {
           undefined,
           cid,
         );
+      }
+
+      // 1b. Frustration detection: if 3+ consecutive failures, clear state and help
+      if (sessionSummary.failedAttempts >= 3) {
+        this.log.warn(
+          `Frustration detected: ${sessionSummary.failedAttempts} consecutive failures`,
+          undefined,
+          cid,
+        );
+        await Promise.all([
+          this.conversation.clearPending(userId),
+          this.conversation.clearBlock(userId),
+        ]);
+        sessionSummary.failedAttempts = 0;
+        await this.conversation.updateSessionSummary(userId, {
+          tool: 'frustration_reset',
+          success: true,
+        });
+        const helpMsg = 'Parece que algo no funcionó. Intenta con: "gasté [monto] en [categoría]" o "registra [monto] como ingreso".';
+        this.saveHistoryAsync(userId, m.text, helpMsg, undefined, undefined, m.channel);
+        return {
+          replies: [{ text: helpMsg, parseMode: 'HTML' }],
+          metrics: { ...metrics, totalMs: Date.now() - startTotal },
+        };
       }
 
       // 2. Detect user style from message
@@ -279,7 +311,7 @@ export class BotService {
           null,
           null,
         );
-        this.saveHistoryAsync(userId, m.text, phaseA.direct_reply!);
+        this.saveHistoryAsync(userId, m.text, phaseA.direct_reply!, undefined, undefined, m.channel);
         return { replies: [{ text: phaseA.direct_reply!, parseMode: 'HTML' }], metrics };
       }
 
@@ -300,13 +332,24 @@ export class BotService {
           null,
           null,
         );
-        this.saveHistoryAsync(userId, m.text, phaseA.clarification!);
+        this.saveHistoryAsync(userId, m.text, phaseA.clarification!, undefined, undefined, m.channel);
         return { replies: [{ text: phaseA.clarification!, parseMode: 'HTML' }], metrics };
       }
 
       // =====================================================================
       // NEW PATH: response_type === 'actions' (multi-action pipeline)
       // =====================================================================
+
+      // Fix: Gemini sometimes returns response_type="actions" with empty actions[]
+      // but puts the actual data in tool_call. Normalize this before routing.
+      if (phaseA.response_type === 'actions' && !phaseA.actions?.length && phaseA.tool_call) {
+        this.log.warn(
+          'Phase A returned actions with empty array + tool_call — normalizing to tool_call',
+          undefined,
+          cid,
+        );
+        phaseA.response_type = 'tool_call';
+      }
 
       if (phaseA.response_type === 'actions' && phaseA.actions?.length) {
         return await this.processActionsPath(
@@ -318,7 +361,7 @@ export class BotService {
           existingBlock,
           userMetrics,
           cooldownFlags,
-          summary,
+          sessionSummary,
           userStyle,
           history,
           metrics,
@@ -359,7 +402,7 @@ export class BotService {
             existingBlock,
             userMetrics,
             cooldownFlags,
-            summary,
+            sessionSummary,
             userStyle,
             history,
             metrics,
@@ -401,7 +444,7 @@ export class BotService {
           null,
           userMetrics,
           cooldownFlags,
-          summary,
+          sessionSummary,
           userStyle,
           history,
           metrics,
@@ -577,9 +620,23 @@ export class BotService {
           null,
           null,
         );
-        this.saveHistoryAsync(userId, m.text, result.userMessage);
+        this.saveHistoryAsync(userId, m.text, result.userMessage, {
+          tool: toolCall.name,
+          slotFill: true,
+        }, m.media, m.channel);
         return { replies: [{ text: result.userMessage }], metrics };
       }
+
+      // 10b. Update session summary after tool execution
+      const updatedSummary = await this.conversation.updateSessionSummary(userId, {
+        tool: toolCall.name,
+        success: result.ok && !result.userMessage,
+        amount: result.data?.amount ?? result.data?.transaction?.amount,
+        category: result.data?.category ?? result.data?.transaction?.category,
+        txId: result.data?.id ?? result.data?.transaction?.id,
+        txType: result.data?.type ?? result.data?.transaction?.type,
+        hasMedia: !!m.media?.length,
+      });
 
       // 11. Build RuntimeContext for Phase B
       const runtimeContext = this.buildRuntimeContext(
@@ -587,7 +644,7 @@ export class BotService {
         userMetrics,
         cooldownFlags,
         userStyle,
-        summary,
+        updatedSummary,
       );
 
       // 12. Build user text for Phase B (for media messages)
@@ -645,11 +702,7 @@ export class BotService {
         cid,
       );
 
-      // 13. WRITE ORDER: Summary AFTER Phase B success only
-      if (phaseB.new_summary) {
-        await this.conversation.saveSummary(userId, phaseB.new_summary);
-        this.log.state('Summary saved', undefined, cid);
-      }
+      // Summary is now deterministic (SessionSummary), updated before Phase B
 
       // 14. Cooldowns AFTER Phase B AND did_nudge=true
       if (phaseB.did_nudge && phaseB.nudge_type) {
@@ -687,7 +740,14 @@ export class BotService {
         null,
       );
 
-      this.saveHistoryAsync(userId, m.text, phaseB.final_message);
+      this.saveHistoryAsync(
+        userId,
+        m.text,
+        phaseB.final_message,
+        this.buildHistoryMetadata(toolCall.name, result),
+        m.media,
+        m.channel,
+      );
 
       return { replies: [{ text: phaseB.final_message, parseMode: 'HTML' }], metrics };
     } catch (err) {
@@ -771,7 +831,7 @@ export class BotService {
     existingBlock: ActionBlock | null,
     userMetrics: any,
     cooldownFlags: any,
-    summary: string | null,
+    sessionSummary: SessionSummary,
     userStyle: any,
     history: any,
     metrics: ProcessingMetrics,
@@ -780,15 +840,27 @@ export class BotService {
     const replies: BotReply[] = [];
 
     // Build or resume ActionBlock
+    // If Phase A returned new actions, those take priority — discard old block.
+    // Only resume existingBlock when Phase A sent NO new actions (slot-fill answer).
     let block: ActionBlock;
+    const phaseAItems = phaseA.actions ?? [];
+    const hasNewActions = phaseAItems.length > 0;
 
-    if (existingBlock) {
-      // Resume: block already loaded with updated item (slot-fill case)
+    if (existingBlock && !hasNewActions) {
+      // Resume: slot-fill case — Phase A returned no new actions, just continue the block
       block = existingBlock;
       this.log.state(`[actions] Resuming block ${block.id}`, undefined, cid);
     } else {
-      // New block from Phase A actions
-      const phaseAItems = phaseA.actions ?? [];
+      // New block from Phase A actions (discard old block if any)
+      if (existingBlock) {
+        await this.conversation.clearBlock(userId);
+        this.log.state(
+          `[actions] Discarded stale block ${existingBlock.id} — new actions from Phase A`,
+          undefined,
+          cid,
+        );
+      }
+
       const limitedItems = phaseAItems.slice(0, 3); // maxItems=3
       const skippedCount = phaseAItems.length - limitedItems.length;
 
@@ -812,7 +884,6 @@ export class BotService {
       );
 
       if (skippedCount > 0) {
-        // Pass the skipped items so the limit message can reference them
         const skippedItems = phaseAItems.slice(3).map((ai, idx) => ({
           id: ai.id ?? (3 + idx),
           tool: ai.tool,
@@ -869,6 +940,26 @@ export class BotService {
       }
     }
 
+    // Update session summary for each executed item
+    for (const item of plannerResult.updatedBlock.items.filter(i => i.status === 'executed')) {
+      await this.conversation.updateSessionSummary(userId, {
+        tool: item.tool,
+        success: true,
+        amount: item.result?.data?.amount ?? item.args?.amount,
+        category: item.result?.data?.category ?? item.args?.category,
+        txId: item.result?.data?.id ?? item.result?.data?.transaction?.id,
+        txType: item.result?.data?.type ?? item.args?.type,
+        hasMedia: !!m.media?.length,
+      });
+    }
+    // Track failed items
+    for (const item of plannerResult.updatedBlock.items.filter(i => i.status === 'failed')) {
+      await this.conversation.updateSessionSummary(userId, {
+        tool: item.tool,
+        success: false,
+      });
+    }
+
     // Save or clear block
     if (plannerResult.blockClosed) {
       await this.conversation.clearBlock(userId);
@@ -899,24 +990,12 @@ export class BotService {
       return { replies, metrics };
     }
 
-    // Block closed — evaluate nudges as separate BotReply BEFORE Phase B closing
-    if (plannerResult.executedCount > 0) {
-      const nudgeReplies = this.evaluateNudges(
-        context,
-        userMetrics,
-        cooldownFlags,
-        plannerResult.updatedBlock,
-      );
-      replies.push(...nudgeReplies);
-    }
-
-    // If no actual actions were executed (only queries or greeting), skip Phase B
+    // If no actual actions were executed (only queries or greeting), skip closing
     const executedItems = plannerResult.updatedBlock.items.filter(
       (i) => i.status === 'executed',
     );
 
     if (executedItems.length === 0) {
-      // All failed/abandoned — just return what we have
       metrics.totalMs = Date.now() - startTotal;
       const combinedText = replies.filter((r) => !r.skipSend).map((r) => r.text).join('\n');
       this.logMessageAsync(
@@ -932,7 +1011,12 @@ export class BotService {
       return { replies, metrics };
     }
 
-    // Phase B: Generate closing message (¿Algo más?)
+    // Block closed — evaluate nudges FIRST to decide closing strategy
+    const nudgeReplies = plannerResult.executedCount > 0
+      ? this.evaluateNudges(context, userMetrics, cooldownFlags, plannerResult.updatedBlock)
+      : [];
+    const hasNudge = nudgeReplies.length > 0;
+
     const primaryTool = this.actionPlanner.getPrimaryTool(executedItems);
     const primaryItem = executedItems.find((i) => i.tool === primaryTool)!;
     const primaryResult: ActionResult = primaryItem.result ?? {
@@ -941,58 +1025,66 @@ export class BotService {
       data: {},
     };
 
-    const runtimeContext = this.buildRuntimeContext(
-      context,
-      userMetrics,
-      cooldownFlags,
-      userStyle,
-      summary,
-      plannerResult.summaryForPhaseB,
-    );
+    let phaseB: any = null;
 
-    const phaseBTimer = this.log.timer('Phase B (closing)', cid);
-    let phaseB;
-    try {
-      phaseB = await this.orchestrator.phaseB(
-        primaryTool,
-        primaryResult,
+    if (hasNudge) {
+      // Nudge IS the closing message — skip Phase B entirely (saves latency)
+      replies.push(...nudgeReplies);
+      this.log.state('Nudge replaces Phase B as closing', undefined, cid);
+    } else {
+      // No nudge — call Phase B for brief personalized closing
+      const runtimeContext = this.buildRuntimeContext(
         context,
-        runtimeContext,
-        m.text || plannerResult.summaryForPhaseB,
-        history,
-      );
-    } catch (phaseBError) {
-      this.log.err(
-        'Phase B (closing) failed',
-        { error: String(phaseBError) },
-        cid,
-      );
-      // Continue without Phase B — confirmations already sent
-    }
-    metrics.phaseBMs =
-      Date.now() -
-      startTotal -
-      metrics.contextMs -
-      metrics.phaseAMs -
-      metrics.toolMs;
-    phaseBTimer();
-
-    if (phaseB?.final_message) {
-      replies.push({ text: phaseB.final_message, parseMode: 'HTML' });
-      this.log.phaseB(
-        'Closing message generated',
-        { length: phaseB.final_message.length },
-        cid,
+        userMetrics,
+        cooldownFlags,
+        userStyle,
+        sessionSummary,
+        plannerResult.summaryForPhaseB,
       );
 
-      if (phaseB.new_summary) {
-        await this.conversation.saveSummary(userId, phaseB.new_summary);
-        this.log.state('Summary saved', undefined, cid);
+      const phaseBTimer = this.log.timer('Phase B (closing)', cid);
+      try {
+        phaseB = await this.orchestrator.phaseB(
+          primaryTool,
+          primaryResult,
+          context,
+          runtimeContext,
+          m.text || plannerResult.summaryForPhaseB,
+          history,
+        );
+      } catch (phaseBError) {
+        this.log.err(
+          'Phase B (closing) failed',
+          { error: String(phaseBError) },
+          cid,
+        );
       }
+      metrics.phaseBMs =
+        Date.now() -
+        startTotal -
+        metrics.contextMs -
+        metrics.phaseAMs -
+        metrics.toolMs;
+      phaseBTimer();
 
-      if (phaseB.did_nudge && phaseB.nudge_type) {
-        await this.cooldowns.recordNudge(userId, phaseB.nudge_type);
-        this.log.state('Nudge recorded', { type: phaseB.nudge_type }, cid);
+      if (phaseB?.final_message) {
+        replies.push({ text: phaseB.final_message, parseMode: 'HTML' });
+        this.log.phaseB(
+          'Closing message generated',
+          { length: phaseB.final_message.length },
+          cid,
+        );
+
+        // Summary is now deterministic (SessionSummary), updated after tool execution
+      }
+    }
+
+    // Record nudge cooldowns (whether from backend nudge or Phase B nudge)
+    if (hasNudge) {
+      // Backend nudge — record cooldown for the nudge types we sent
+      for (const nr of nudgeReplies) {
+        const nudgeType = nr.text.includes('presupuesto') ? 'budget' : 'streak';
+        await this.cooldowns.recordNudge(userId, nudgeType);
       }
     }
 
@@ -1001,6 +1093,7 @@ export class BotService {
       'Actions flow complete',
       {
         executed: plannerResult.executedCount,
+        nudge: hasNudge,
         context: `${metrics.contextMs}ms`,
         phaseA: `${metrics.phaseAMs}ms`,
         tool: `${metrics.toolMs}ms`,
@@ -1022,7 +1115,19 @@ export class BotService {
       null,
     );
 
-    this.saveHistoryAsync(userId, m.text, combinedText);
+    this.saveHistoryAsync(
+      userId,
+      m.text,
+      combinedText,
+      this.buildHistoryMetadata(primaryTool, primaryResult),
+      m.media,
+      m.channel,
+    );
+
+    // Bug D fix: ensure at least one reply
+    if (!replies.length || !replies.some(r => !r.skipSend && r.text?.trim())) {
+      replies.push({ text: 'No entendí tu mensaje. ¿Puedes reformularlo?' });
+    }
 
     return { replies, metrics };
   }
@@ -1035,21 +1140,23 @@ export class BotService {
     context: any,
     userMetrics: any,
     cooldownFlags: any,
-    block: ActionBlock,
+    _block: ActionBlock,
   ): BotReply[] {
     const nudges: BotReply[] = [];
 
-    if (!cooldownFlags.canBudgetWarning) return nudges;
-
-    const budget = context.activeBudget;
-    if (budget?.amount && budget.spent != null) {
-      const percent = budget.spent / budget.amount;
-      if (percent >= 0.8 && cooldownFlags.canBudgetWarning) {
-        const nudge = this.responseBuilder.buildBudgetNudge(percent);
-        if (nudge.text) nudges.push(nudge);
+    // Budget warning (5h cooldown)
+    if (cooldownFlags.canBudgetWarning) {
+      const budget = context.activeBudget;
+      if (budget?.amount && budget.spent != null) {
+        const percent = budget.spent / budget.amount;
+        if (percent >= 0.8) {
+          const nudge = this.responseBuilder.buildBudgetNudge(percent);
+          if (nudge.text) nudges.push(nudge);
+        }
       }
     }
 
+    // Streak celebration (24h global cooldown)
     if (cooldownFlags.canNudge && userMetrics.txStreakDays >= 7) {
       const nudge = this.responseBuilder.buildStreakNudge(userMetrics.txStreakDays);
       if (nudge.text) nudges.push(nudge);
@@ -1062,12 +1169,32 @@ export class BotService {
   // Helpers
   // ===========================================================================
 
+  private serializeSessionSummary(ss: SessionSummary, blockSummary?: string): string {
+    const parts: string[] = [];
+    if (ss.todayTxCount > 0) {
+      parts.push(`Hoy: ${ss.todayTxCount} transacciones, $${ss.todayTotalSpent} gastado, $${ss.todayTotalIncome} ingresado`);
+    }
+    if (ss.todayCategories.length > 0) {
+      parts.push(`Categorías hoy: ${ss.todayCategories.join(', ')}`);
+    }
+    if (ss.lastTool) {
+      parts.push(`Última acción: ${ss.lastTool}`);
+    }
+    if (ss.sessionTopics.length > 0) {
+      parts.push(`Temas: ${ss.sessionTopics.join(', ')}`);
+    }
+    if (blockSummary) {
+      parts.push(blockSummary);
+    }
+    return parts.join('. ') || '';
+  }
+
   private buildRuntimeContext(
     context: any,
     userMetrics: any,
     cooldownFlags: any,
     userStyle: any,
-    summary: string | null,
+    sessionSummary: SessionSummary,
     blockSummary?: string,
   ): RuntimeContext {
     const budgetPercent =
@@ -1078,7 +1205,7 @@ export class BotService {
     const moodHint = this.metricsService.calculateMoodHint(context, userMetrics);
 
     return {
-      summary: blockSummary ? `${summary ?? ''}\n${blockSummary}`.trim() : (summary ?? undefined),
+      summary: this.serializeSessionSummary(sessionSummary, blockSummary) || undefined,
       metrics: {
         tx_streak_days: userMetrics.txStreakDays,
         week_tx_count: userMetrics.weekTxCount,
@@ -1133,12 +1260,86 @@ export class BotService {
     userId: string,
     userMessage: string,
     assistantMessage: string,
+    metadata?: ConversationMessageMetadata,
+    media?: MediaAttachment[],
+    channel: string = 'test',
   ): void {
+    // Convert MediaAttachment[] to lightweight MediaReference[] (no base64)
+    const mediaRefs = media?.length
+      ? media.map((m) => ({
+          type: m.type as 'image' | 'audio' | 'document',
+          mimeType: m.mimeType,
+          fileName: m.fileName,
+        }))
+      : undefined;
+
+    // Tier 1: Redis working memory
     this.historyService
-      .appendToHistory(userId, userMessage, assistantMessage)
+      .appendWithMetadata(userId, userMessage, assistantMessage, metadata, mediaRefs)
       .catch((err) => {
         console.error('[BotService] Failed to save history:', err);
       });
+
+    // Tier 3: Supabase long-term memory (fire-and-forget)
+    const mediaType = media?.[0]?.type ?? undefined;
+    const mediaDesc = media?.[0]?.fileName ?? undefined;
+    this.conversationLog
+      .logExchange(
+        { userId, role: 'user', content: userMessage, channel, mediaType, mediaDesc },
+        {
+          userId,
+          role: 'assistant',
+          content: assistantMessage,
+          channel,
+          tool: metadata?.tool,
+          action: metadata?.action,
+          amount: metadata?.amount,
+          category: metadata?.category,
+          txId: metadata?.txId,
+        },
+      )
+      .catch((err) => {
+        console.error('[BotService] Failed to log conversation:', err);
+      });
+  }
+
+  private buildHistoryMetadata(
+    toolName: string,
+    result: ActionResult,
+  ): ConversationMessageMetadata {
+    const meta: ConversationMessageMetadata = { tool: toolName };
+    if (!result.ok || !result.data) return meta;
+    const d = result.data;
+    switch (toolName) {
+      case 'register_transaction':
+        meta.action = d.type === 'income' ? 'income_registered' : 'expense_registered';
+        meta.amount = d.amount ?? d.transaction?.amount;
+        meta.category = d.category ?? d.transaction?.category;
+        meta.txId = d.id ?? d.transaction?.id;
+        break;
+      case 'manage_transactions':
+        meta.action = `transaction_${d.operation ?? 'unknown'}`;
+        meta.amount = d.deleted?.amount ?? d.previous?.amount;
+        meta.txId = d.transaction_id ?? d.deleted?.transaction_id ?? d.deleted?.id;
+        break;
+      case 'manage_categories':
+        meta.action = `category_${d.operation ?? 'unknown'}`;
+        if (d.transaction) {
+          meta.amount = d.transaction.amount;
+          meta.txId = d.transaction.id ?? d.transaction.transaction_id;
+        }
+        break;
+      case 'ask_balance':
+        meta.action = 'balance_queried';
+        break;
+      case 'ask_budget_status':
+        meta.action = 'budget_queried';
+        break;
+      case 'ask_goal_status':
+        meta.action = 'goals_queried';
+        break;
+    }
+    return meta;
   }
 
   private logMessageAsync(

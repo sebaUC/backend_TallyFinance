@@ -39,9 +39,28 @@ export interface PendingSlotContext {
 
 // ============ Conversation History ============
 
+export interface MediaReference {
+  type: 'image' | 'audio' | 'document';
+  mimeType: string;
+  fileName?: string;
+  description?: string;          // Generated description (OCR, transcription, etc.)
+}
+
+export interface ConversationMessageMetadata {
+  tool?: string;               // Tool used (register_transaction, ask_balance, etc.)
+  action?: string;             // Result: 'expense_registered', 'income_registered', etc.
+  amount?: number;             // Amount if applicable
+  category?: string;           // Category if applicable
+  txId?: string;               // Transaction ID (for undo/delete/edit references)
+  slotFill?: boolean;          // true if this is a slot-fill question
+  media?: MediaReference[];    // Media attachments sent by user
+}
+
 export interface ConversationMessage {
   role: 'user' | 'assistant';
   content: string;
+  timestamp?: string;          // ISO-8601 (optional for backward compat)
+  metadata?: ConversationMessageMetadata;
 }
 
 // ============ Phase A ============

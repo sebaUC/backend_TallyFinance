@@ -114,11 +114,34 @@ export class ResponseBuilderService {
         const balance = data?.totalBalance ?? data?.unifiedBalance ?? 0;
         const spent = data?.totalSpent ?? 0;
         const income = data?.totalIncome ?? 0;
-        let text =
-          `💰 Balance: <b>$${this.formatCLP(balance)}</b>\n` +
-          `Gastos del mes: $${this.formatCLP(spent)}`;
-        if (income > 0) text += ` · Ingresos: $${this.formatCLP(income)}`;
-        if (data?.activeBudget?.amount) {
+        const filter = data?.filter;
+        const periodLabel = data?.periodLabel ?? 'este mes';
+        const categoryLabel = filter?.category ? ` en ${this.escapeHtml(filter.category)}` : '';
+        const typeLabel = filter?.type === 'expense' ? ' (gastos)' : filter?.type === 'income' ? ' (ingresos)' : '';
+
+        let text: string;
+        if (filter) {
+          // Filtered query — show focused result
+          const lines: string[] = [];
+          if (filter.type !== 'income' && spent > 0) {
+            lines.push(`💸 Gastos${categoryLabel} ${periodLabel}: <b>$${this.formatCLP(spent)}</b>`);
+          }
+          if (filter.type !== 'expense' && income > 0) {
+            lines.push(`💰 Ingresos${categoryLabel} ${periodLabel}: <b>$${this.formatCLP(income)}</b>`);
+          }
+          if (lines.length === 0) {
+            text = `No hay ${filter.type === 'income' ? 'ingresos' : 'gastos'}${categoryLabel} ${periodLabel}.`;
+          } else {
+            text = lines.join('\n');
+          }
+        } else {
+          // Default query — full balance view
+          text =
+            `💰 Balance: <b>$${this.formatCLP(balance)}</b>\n` +
+            `Gastos ${periodLabel}: $${this.formatCLP(spent)}`;
+          if (income > 0) text += ` · Ingresos: $${this.formatCLP(income)}`;
+        }
+        if (data?.activeBudget?.amount && !filter) {
           const remaining =
             data.activeBudget.remaining ??
             data.activeBudget.amount - spent;

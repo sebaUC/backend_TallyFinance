@@ -249,9 +249,6 @@ export class ActionPlannerService {
     ).length;
     const blockClosed = pendingCount === 0;
 
-    // 6. Group same-type confirmations if 3 of the same tool
-    const finalReplies = this.maybeGroupReplies(replies, block, executedItems);
-
     const summaryForPhaseB = this.buildSummary(executedItems);
 
     this.log.state(
@@ -261,39 +258,13 @@ export class ActionPlannerService {
     );
 
     return {
-      replies: finalReplies,
+      replies,
       updatedBlock: block,
       executedCount,
       pendingCount,
       blockClosed,
       summaryForPhaseB,
     };
-  }
-
-  // =========================================================================
-  // Grouping: if 3 register_transaction confirmations, show grouped summary
-  // =========================================================================
-
-  private maybeGroupReplies(
-    replies: BotReply[],
-    block: ActionBlock,
-    executedItems: ActionItem[],
-  ): BotReply[] {
-    const txItems = executedItems.filter(
-      (i) => i.tool === 'register_transaction' && i.status === 'executed',
-    );
-    if (txItems.length < 3) return replies;
-
-    // Replace individual tx confirmations with grouped summary
-    const grouped = this.responseBuilder.buildGroupedConfirmation(txItems);
-    const nonTxReplies = replies.filter((r) => {
-      const isTxConfirmation = txItems.some(
-        (i) => r.text.includes(this.responseBuilder.formatCLP(i.args?.amount ?? 0)),
-      );
-      return !isTxConfirmation;
-    });
-
-    return [grouped, ...nonTxReplies];
   }
 
   // =========================================================================

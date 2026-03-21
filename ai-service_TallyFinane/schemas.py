@@ -132,10 +132,31 @@ class PendingSlotContext(BaseModel):
     asked_at: Optional[str] = None  # ISO timestamp when we asked
 
 
+class MediaReference(BaseModel):
+    """Reference to media sent in conversation (no base64, just metadata)."""
+    type: str  # image, audio, document
+    mimeType: str
+    fileName: Optional[str] = None
+    description: Optional[str] = None
+
+
+class ConversationMessageMetadata(BaseModel):
+    """Metadata for messages in conversation history."""
+    tool: Optional[str] = None
+    action: Optional[str] = None
+    amount: Optional[float] = None
+    category: Optional[str] = None
+    txId: Optional[str] = None
+    slotFill: Optional[bool] = None
+    media: Optional[List[MediaReference]] = None
+
+
 class ConversationMessage(BaseModel):
     """A single message in conversation history (Tier 1 working memory)."""
     role: Literal["user", "assistant"]
     content: str
+    timestamp: Optional[str] = None
+    metadata: Optional[ConversationMessageMetadata] = None
 
 
 class MediaPayload(BaseModel):

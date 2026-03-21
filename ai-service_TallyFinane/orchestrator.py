@@ -284,10 +284,34 @@ IMPORTANTE: Combina los args recolectados con lo nuevo del usuario."""
         # Build message array: system + conversation history + current user message
         messages = [{"role": "system", "content": system_prompt}]
 
-        # Inject Tier 1 conversation history (if available)
+        # Inject Tier 1 conversation history with metadata enrichment
         if conversation_history:
             for msg in conversation_history:
-                messages.append({"role": msg.role, "content": msg.content})
+                content = msg.content
+                # Enrich messages with metadata for contextual reference
+                if msg.metadata:
+                    meta = msg.metadata
+                    meta_parts = []
+                    if meta.tool:
+                        meta_parts.append(f"tool={meta.tool}")
+                    if meta.action:
+                        meta_parts.append(f"action={meta.action}")
+                    if meta.amount is not None:
+                        meta_parts.append(f"amount={meta.amount}")
+                    if meta.category:
+                        meta_parts.append(f"category={meta.category}")
+                    if meta.txId:
+                        meta_parts.append(f"txId={meta.txId}")
+                    if meta.slotFill:
+                        meta_parts.append("slotFill=true")
+                    if meta.media:
+                        for m_ref in meta.media:
+                            icon = "📷" if m_ref.type == "image" else "🎤" if m_ref.type == "audio" else "📄"
+                            desc = m_ref.description or m_ref.fileName or m_ref.type
+                            meta_parts.append(f"media={icon} {desc}")
+                    if meta_parts:
+                        content = f"[{', '.join(meta_parts)}] {content}"
+                messages.append({"role": msg.role, "content": content})
             log.state("History injected (Phase A)", {"count": len(conversation_history)}, cid)
 
         messages.append({"role": "user", "content": user_text})
@@ -531,10 +555,31 @@ NUDGES PERMITIDOS:
         # Build message array: system + conversation history + user message
         messages = [{"role": "system", "content": system_prompt}]
 
-        # Inject Tier 1 conversation history (if available)
+        # Inject Tier 1 conversation history with metadata enrichment
         if conversation_history:
             for msg in conversation_history:
-                messages.append({"role": msg.role, "content": msg.content})
+                content = msg.content
+                if msg.metadata:
+                    meta = msg.metadata
+                    meta_parts = []
+                    if meta.tool:
+                        meta_parts.append(f"tool={meta.tool}")
+                    if meta.action:
+                        meta_parts.append(f"action={meta.action}")
+                    if meta.amount is not None:
+                        meta_parts.append(f"amount={meta.amount}")
+                    if meta.category:
+                        meta_parts.append(f"category={meta.category}")
+                    if meta.txId:
+                        meta_parts.append(f"txId={meta.txId}")
+                    if meta.media:
+                        for m_ref in meta.media:
+                            icon = "📷" if m_ref.type == "image" else "🎤" if m_ref.type == "audio" else "📄"
+                            desc = m_ref.description or m_ref.fileName or m_ref.type
+                            meta_parts.append(f"media={icon} {desc}")
+                    if meta_parts:
+                        content = f"[{', '.join(meta_parts)}] {content}"
+                messages.append({"role": msg.role, "content": content})
             log.state("History injected (Phase B)", {"count": len(conversation_history)}, cid)
 
         # Use real user text for natural continuation, fallback to fixed prompt

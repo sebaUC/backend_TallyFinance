@@ -57,7 +57,10 @@ TOOL_SCHEMAS: List[ToolSchema] = [
                 ),
                 "category": ToolSchemaParameter(
                     type="string",
-                    description="Nombre de la categoria (ej: comida, transporte, entretenimiento, arriendo, servicios)",
+                    description=(
+                        "Nombre de la categoria (ej: comida, transporte, entretenimiento). "
+                        "Para type='income' (ingresos) NO enviar este campo — los ingresos no requieren categoria."
+                    ),
                 ),
                 "posted_at": ToolSchemaParameter(
                     type="string",
@@ -209,9 +212,46 @@ TOOL_SCHEMAS: List[ToolSchema] = [
     ),
     ToolSchema(
         name="ask_balance",
-        description="Consulta el saldo actual del usuario en sus cuentas/metodos de pago",
+        description=(
+            "Consulta el saldo, gastos e ingresos del usuario. "
+            "Soporta filtros por período, categoría y tipo. "
+            "Usar cuando el usuario pregunta cuánto gastó, su balance, "
+            "o consultas como 'cuánto gasté en comida esta semana'."
+        ),
         parameters=ToolSchemaParameters(
-            properties={},
+            properties={
+                "period": ToolSchemaParameter(
+                    type="string",
+                    description=(
+                        "Período a consultar: 'today' (hoy), 'week' (esta semana), "
+                        "'month' (este mes, default), 'custom' (rango personalizado). "
+                        "Usa 'today' para 'hoy', 'week' para 'esta semana', 'month' para 'este mes'."
+                    ),
+                ),
+                "start_date": ToolSchemaParameter(
+                    type="string",
+                    description="Fecha inicio ISO-8601 (solo si period='custom'). Ej: '2026-03-01'",
+                ),
+                "end_date": ToolSchemaParameter(
+                    type="string",
+                    description="Fecha fin ISO-8601 (solo si period='custom'). Ej: '2026-03-15'",
+                ),
+                "category": ToolSchemaParameter(
+                    type="string",
+                    description=(
+                        "Filtrar por categoría específica. "
+                        "Usar el nombre exacto de la categoría del usuario. "
+                        "Ej: 'Alimentación', 'Transporte'"
+                    ),
+                ),
+                "type": ToolSchemaParameter(
+                    type="string",
+                    description=(
+                        "Filtrar por tipo: 'expense' (solo gastos), 'income' (solo ingresos), "
+                        "'all' (ambos, default). Usar cuando el usuario especifica."
+                    ),
+                ),
+            },
             required=[],
         ),
     ),

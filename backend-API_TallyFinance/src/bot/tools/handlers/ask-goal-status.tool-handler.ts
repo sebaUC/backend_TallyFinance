@@ -67,8 +67,7 @@ export class AskGoalStatusToolHandler implements ToolHandler {
       return {
         ok: true,
         action: 'ask_goal_status',
-        userMessage:
-          'Aún no configuraste metas financieras. ¿Quieres agregar una?',
+        data: { goals: [], message: 'Aún no configuraste metas financieras.' },
       };
     }
 
