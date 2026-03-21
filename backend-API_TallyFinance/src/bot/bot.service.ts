@@ -1068,12 +1068,29 @@ export class BotService {
       phaseBTimer();
 
       if (phaseB?.final_message) {
-        replies.push({ text: phaseB.final_message, parseMode: 'HTML' });
-        this.log.phaseB(
-          'Closing message generated',
-          { length: phaseB.final_message.length },
-          cid,
-        );
+        // Sanitize: strip duplicate confirmation lines (✅, $, montos)
+        // Phase B should only generate brief closing, but LLMs sometimes repeat
+        const closingText = phaseB.final_message
+          .split('\n')
+          .filter((line: string) => {
+            const trimmed = line.trim();
+            // Remove lines that look like template confirmations
+            if (trimmed.startsWith('✅')) return false;
+            if (/^\$[\d.,]+/.test(trimmed)) return false;
+            if (/^💰|^🍽️|^🚗|^💊|^📚|^🎬|^🏠|^👕|^📱|^💼|^💳/.test(trimmed)) return false;
+            return true;
+          })
+          .join('\n')
+          .trim();
+
+        if (closingText) {
+          replies.push({ text: closingText, parseMode: 'HTML' });
+          this.log.phaseB(
+            'Closing message generated',
+            { length: closingText.length },
+            cid,
+          );
+        }
 
         // Summary is now deterministic (SessionSummary), updated after tool execution
       }
