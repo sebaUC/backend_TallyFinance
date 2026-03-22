@@ -732,16 +732,19 @@ export class BotService {
         null,
       );
 
+      // Sanitize Phase B output (strip leaked metadata / duplicate confirmations)
+      const sanitizedReply = this.sanitizePhaseBOutput(phaseB.final_message) || phaseB.final_message;
+
       this.saveHistoryAsync(
         userId,
         m.text,
-        phaseB.final_message,
+        sanitizedReply,
         this.buildHistoryMetadata(toolCall.name, result),
         m.media,
         m.channel,
       );
 
-      return { replies: [{ text: phaseB.final_message, parseMode: 'HTML' }], metrics };
+      return { replies: [{ text: sanitizedReply, parseMode: 'HTML' }], metrics };
     } catch (err) {
       metrics.totalMs = Date.now() - startTotal;
 
@@ -1060,20 +1063,7 @@ export class BotService {
       phaseBTimer();
 
       if (phaseB?.final_message) {
-        // Sanitize: strip duplicate confirmation lines (✅, $, montos)
-        // Phase B should only generate brief closing, but LLMs sometimes repeat
-        const closingText = phaseB.final_message
-          .split('\n')
-          .filter((line: string) => {
-            const trimmed = line.trim();
-            // Remove lines that look like template confirmations
-            if (trimmed.startsWith('✅')) return false;
-            if (/^\$[\d.,]+/.test(trimmed)) return false;
-            if (/^💰|^🍽️|^🚗|^💊|^📚|^🎬|^🏠|^👕|^📱|^💼|^💳/.test(trimmed)) return false;
-            return true;
-          })
-          .join('\n')
-          .trim();
+        const closingText = this.sanitizePhaseBOutput(phaseB.final_message);
 
         if (closingText) {
           replies.push({ text: closingText, parseMode: 'HTML' });
@@ -1231,6 +1221,26 @@ export class BotService {
         is_formal: userStyle.isFormal,
       },
     };
+  }
+
+  /**
+   * Strips duplicate confirmations and leaked metadata from Phase B output.
+   * Phase B should only generate a brief closing, never repeat template confirmations.
+   */
+  private sanitizePhaseBOutput(text: string): string {
+    return text
+      .split('\n')
+      .filter((line: string) => {
+        const trimmed = line.trim();
+        if (!trimmed) return false;
+        if (trimmed.includes('✅')) return false;
+        if (/^\[tool=/.test(trimmed)) return false;
+        if (/^\$[\d.,]+/.test(trimmed)) return false;
+        if (/^💰|^🍽️|^🚗|^💊|^📚|^🎬|^🏠|^👕|^📱|^💼|^💳/.test(trimmed)) return false;
+        return true;
+      })
+      .join('\n')
+      .trim();
   }
 
   private buildPhaseBUserText(
