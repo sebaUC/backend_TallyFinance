@@ -201,6 +201,49 @@ export class AuthService {
     return { user: data.user, session: data.session };
   }
 
+  // 🗑️ Eliminar cuenta completa
+  async deleteAccount(userId: string) {
+    this.logger.warn(`[deleteAccount] Deleting all data for user ${userId}`);
+
+    // Order matters — delete referencing tables first, then parents
+    const tables = [
+      { table: 'transactions', col: 'user_id' },
+      { table: 'bot_message_log', col: 'user_id' },
+      { table: 'conversation_history', col: 'user_id' },
+      { table: 'channel_accounts', col: 'user_id' },
+      { table: 'goals', col: 'user_id' },
+      { table: 'categories', col: 'user_id' },
+      { table: 'accounts', col: 'user_id' },
+      { table: 'payment_method', col: 'user_id' },
+      { table: 'spending_expectations', col: 'user_id' },
+      { table: 'income_expectations', col: 'user_id' },
+      { table: 'personality_snapshot', col: 'user_id' },
+      { table: 'user_prefs', col: 'id' },
+      { table: 'user_emotional_log', col: 'user_id' },
+      { table: 'users', col: 'id' },
+    ];
+
+    for (const { table, col } of tables) {
+      const { error } = await this.supabase
+        .from(table)
+        .delete()
+        .eq(col, userId);
+      if (error) {
+        this.logger.warn(`[deleteAccount] Failed to delete from ${table}: ${error.message}`);
+        // Continue — best effort cleanup
+      }
+    }
+
+    // Delete from auth.users (removes login credentials)
+    const { error: authError } = await this.supabase.auth.admin.deleteUser(userId);
+    if (authError) {
+      this.logger.error(`[deleteAccount] Failed to delete auth user: ${authError.message}`);
+      throw new InternalServerErrorException('Error eliminando la cuenta de autenticación');
+    }
+
+    this.logger.log(`[deleteAccount] Account fully deleted: ${userId}`);
+  }
+
   // 🔒 Cambiar contraseña (autenticado)
   async changePassword(userId: string, newPassword: string) {
     const { error } = await this.supabase.auth.admin.updateUserById(userId, {

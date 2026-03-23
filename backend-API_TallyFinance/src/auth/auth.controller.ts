@@ -176,6 +176,19 @@ export class AuthController {
     return { message: 'Contraseña actualizada' };
   }
 
+  @Post('delete-account')
+  @UseGuards(JwtGuard)
+  async deleteAccount(
+    @User() user: any,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    await this.auth.deleteAccount(user.id);
+    // Clear cookies
+    res.clearCookie('access_token');
+    res.clearCookie('refresh_token');
+    return { message: 'Cuenta eliminada' };
+  }
+
   @Post('signin')
   async signIn(
     @Body() dto: SignInDto,
