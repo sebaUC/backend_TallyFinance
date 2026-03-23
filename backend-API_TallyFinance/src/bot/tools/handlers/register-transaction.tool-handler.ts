@@ -100,8 +100,49 @@ export class RegisterTransactionToolHandler implements ToolHandler {
       };
     }
 
-    // For income: category is optional — register without it if missing
+    // Balance set: update account balance directly (no transaction created)
     const txType = type ?? 'expense';
+    if (txType === 'balance_set') {
+      const { data: account } = await this.supabase
+        .from('accounts')
+        .select('id')
+        .eq('user_id', userId)
+        .limit(1)
+        .maybeSingle();
+
+      if (!account) {
+        return {
+          ok: false,
+          action: 'register_transaction',
+          errorCode: 'NO_ACCOUNT',
+          userMessage: 'No tienes cuentas configuradas.',
+        };
+      }
+
+      const { error: updateError } = await this.supabase
+        .from('accounts')
+        .update({ current_balance: Number(amount) })
+        .eq('id', account.id);
+
+      if (updateError) {
+        return {
+          ok: false,
+          action: 'register_transaction',
+          errorCode: 'DB_UPDATE_FAILED',
+        };
+      }
+
+      return {
+        ok: true,
+        action: 'balance_set',
+        data: {
+          amount: Number(amount),
+          type: 'balance_set',
+          name: name ?? 'Balance actualizado',
+        },
+      };
+    }
+
     const isIncome = txType === 'income';
 
     if (!category && !isIncome) {

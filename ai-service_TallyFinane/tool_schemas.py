@@ -74,7 +74,12 @@ TOOL_SCHEMAS: List[ToolSchema] = [
                 ),
                 "type": ToolSchemaParameter(
                     type="string",
-                    description="Tipo: 'expense' (default) o 'income' (sueldo, pago recibido, venta). Solo enviar si es ingreso.",
+                    description=(
+                        "Tipo: 'expense' (default), 'income' (sueldo, pago recibido, venta), "
+                        "o 'balance_set' (setear balance de cuenta — cuando el usuario dice cuánto tiene, "
+                        "ej: 'tengo 500 mil en mi cuenta', 'mi saldo es 300 mil', 'ajusta mi balance a 100 mil'). "
+                        "'balance_set' NO crea transacción, solo actualiza el saldo de la cuenta."
+                    ),
                 ),
                 "name": ToolSchemaParameter(
                     type="string",

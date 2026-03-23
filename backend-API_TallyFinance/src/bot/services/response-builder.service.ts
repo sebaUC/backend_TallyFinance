@@ -56,6 +56,11 @@ export class ResponseBuilderService {
     const op = data?.operation;
 
     switch (tool) {
+      case 'balance_set': {
+        const amount = data?.amount ?? 0;
+        return `✅ Balance actualizado: <b>$${this.formatCLP(amount)}</b>`;
+      }
+
       case 'register_transaction': {
         const amount = data?.amount ?? data?.transaction?.amount ?? 0;
         const name =
@@ -67,6 +72,9 @@ export class ResponseBuilderService {
         const date = this.formatDate(
           data?.posted_at ?? data?.transaction?.posted_at,
         );
+        if (data?.type === 'balance_set') {
+          return `✅ Balance actualizado: <b>$${this.formatCLP(amount)}</b>`;
+        }
         if (data?.type === 'income' || data?.transaction?.type === 'income') {
           return (
             `✅ <b>$${this.formatCLP(amount)}</b> — ${this.escapeHtml(name)}\n` +
