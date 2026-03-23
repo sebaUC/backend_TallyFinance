@@ -181,14 +181,14 @@ TOOL_SCHEMAS: List[ToolSchema] = [
                     type="string",
                     description=(
                         "Emoji representativo para la categoría. "
-                        "Para operation=create: OBLIGATORIO, siempre asignar uno acorde al nombre. "
-                        "Ejemplos: Comida/Alimentación→🍽️, Transporte→🚗, Salud→💊, "
-                        "Ropa/Vestuario→👕, Entretenimiento→🎬, Hogar→🏠, Trabajo→💼, "
-                        "Ahorro→💰, Deporte/Gym→💪, Educación→📚, Mascotas→🐾, "
-                        "Viaje/Vacaciones→✈️, Restaurante→🍴, Tecnología→💻, "
-                        "Bar/Alcohol→🍺, Supermercado→🛒, Gasolina→⛽, Ocio→🎯, "
-                        "Cuidado personal→💆, Servicios→🔧, Streaming→📺, "
-                        "Delivery→📦, Farmacia→💊, Café→☕, Gym→🏋️"
+                        "Para operation=create: OBLIGATORIO, siempre asignar uno. "
+                        "Elige el emoji que MEJOR represente el concepto de la categoría. "
+                        "Puedes usar CUALQUIER emoji existente — no te limites a una lista fija. "
+                        "Busca el emoji más específico y semánticamente correcto. "
+                        "Ej: Filosofía→🧠, Gaming→🎮, Pilates→🧘, Cerveza→🍺, "
+                        "Natación→🏊, Cine→🎬, Sushi→🍣, Peluquería→💇, Dentista→🦷, "
+                        "Veterinario→🐕, Lavandería→👔, Bicicleta→🚴, Parking→🅿️. "
+                        "Sé creativo y preciso — el emoji debe ser reconocible al instante."
                     ),
                 ),
                 "parent_name": ToolSchemaParameter(
