@@ -475,11 +475,16 @@ export class BotService {
       this.log.tool(`Calling ${toolCall.name}`, { args: toolCall.args }, cid);
 
       // 7a. Amount hallucination guard: verify amount exists in user's message text
+      // Skip when: balance_set, slot-fill continuation, or category_not_found follow-up
+      const hasRecentCategoryNotFound = history?.some(
+        (h: any) => h.metadata?.action === 'category_not_found',
+      );
       if (
         toolCall.name === 'register_transaction' &&
         toolCall.args.amount &&
         toolCall.args.type !== 'balance_set' &&
-        !pending // skip check if completing a slot-fill (amount was collected earlier)
+        !pending && // skip if completing a slot-fill
+        !hasRecentCategoryNotFound // skip if following up on category_not_found
       ) {
         const amount = Number(toolCall.args.amount);
         const text = m.text || '';
