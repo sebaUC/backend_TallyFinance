@@ -136,6 +136,34 @@ export class ActionPlannerService {
         processedIds.add(item.id);
         this.log.tool(`[item:${item.id}] Executing ${item.tool}`, { args: item.args }, cid);
 
+        // Amount hallucination guard for register_transaction
+        if (
+          item.tool === 'register_transaction' &&
+          item.args.amount &&
+          item.args.type !== 'balance_set'
+        ) {
+          const amount = Number(item.args.amount);
+          const text = msg.text || '';
+          const lucasMatch = text.match(/(\d[\d.]*)\s*lucas/i);
+          const numbers = (text.match(/\d[\d.,]*/g) || []).map((n) =>
+            Number(n.replace(/\./g, '').replace(',', '.')),
+          );
+          if (lucasMatch) {
+            numbers.push(Number(lucasMatch[1].replace(/\./g, '')) * 1000);
+          }
+          if (!numbers.some((n) => n === amount || Math.abs(n - amount) < 1)) {
+            item.status = 'needs_info';
+            item.question = '¿Cuánto fue exactamente?';
+            item.attempts++;
+            this.log.warn(
+              `[item:${item.id}] Amount hallucination: ${amount} not in "${text}"`,
+              undefined,
+              cid,
+            );
+            continue;
+          }
+        }
+
         // Validate with guardrails
         const toolCall = { name: item.tool, args: { ...item.args } };
         const validation = this.guardrails.validate(toolCall);

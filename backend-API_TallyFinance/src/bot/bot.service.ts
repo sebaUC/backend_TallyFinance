@@ -474,7 +474,42 @@ export class BotService {
       metrics.toolName = toolCall.name;
       this.log.tool(`Calling ${toolCall.name}`, { args: toolCall.args }, cid);
 
-      // 7. Validate arguments with Guardrails
+      // 7a. Amount hallucination guard: verify amount exists in user's message text
+      if (
+        toolCall.name === 'register_transaction' &&
+        toolCall.args.amount &&
+        toolCall.args.type !== 'balance_set' &&
+        !pending // skip check if completing a slot-fill (amount was collected earlier)
+      ) {
+        const amount = Number(toolCall.args.amount);
+        const text = m.text || '';
+        // Extract all numbers from user message (handles "lucas" = x1000)
+        const lucasMatch = text.match(/(\d[\d.]*)\s*lucas/i);
+        const numbers = (text.match(/\d[\d.,]*/g) || []).map((n) =>
+          Number(n.replace(/\./g, '').replace(',', '.')),
+        );
+        if (lucasMatch) {
+          numbers.push(Number(lucasMatch[1].replace(/\./g, '')) * 1000);
+        }
+        const amountFoundInText = numbers.some(
+          (n) => n === amount || Math.abs(n - amount) < 1,
+        );
+        if (!amountFoundInText) {
+          this.log.warn(
+            `Amount hallucination detected: ${amount} not found in "${text}"`,
+            undefined,
+            cid,
+          );
+          const reply = '¿Cuánto fue exactamente?';
+          this.logMessageAsync(userId, m.channel, m.text, reply, toolCall.name,
+            phaseA as unknown as Record<string, unknown>, null, null);
+          this.saveHistoryAsync(userId, m.text, reply, { tool: toolCall.name, slotFill: true }, m.media, m.channel);
+          metrics.totalMs = Date.now() - startTotal;
+          return { replies: [{ text: reply }], metrics };
+        }
+      }
+
+      // 7b. Validate arguments with Guardrails
       const validation = this.guardrails.validate(toolCall);
       if (!validation.valid) {
         this.log.warn('Guardrails rejected', { error: validation.error }, cid);
