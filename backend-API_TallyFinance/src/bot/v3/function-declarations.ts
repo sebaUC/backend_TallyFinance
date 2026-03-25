@@ -13,32 +13,30 @@ export const botTools: Tool[] = [
     functionDeclarations: [
       {
         name: 'register_expense',
-        description: 'Registra un gasto del usuario. Solo llamar si el usuario menciona un MONTO EXPLÍCITO.',
+        description: 'Registra un gasto del usuario. Llamar apenas el usuario mencione un monto. No pedir confirmación — registrar directamente. Si falta categoría, usar la más lógica o el texto del usuario.',
         parameters: {
           type: 'object' as any,
           properties: {
-            amount: S('number', 'Monto en CLP (pesos chilenos). DEBE ser un número explícito del mensaje del usuario.'),
-            category: S('string', 'Nombre de la categoría. Usar una de las categorías del usuario. Si no existe ninguna adecuada, enviar el nombre que dijo el usuario.'),
-            name: S('string', 'Nombre descriptivo corto de la transacción (2-4 palabras, Title Case). Ej: "Almuerzo Trabajo", "Uber Aeropuerto", "Café Reunión"'),
-            posted_at: S('string', 'Fecha ISO-8601 (YYYY-MM-DD). Default: fecha actual en Chile.'),
-            description: S('string', 'Descripción adicional opcional'),
+            amount: S('number', 'Monto en CLP. DEBE ser un número explícito del mensaje del usuario.'),
+            category: S('string', 'Categoría del gasto. Deducir del contexto (uber→Transporte, almuerzo→Alimentación). Si no encaja en ninguna, enviar lo que dijo el usuario.'),
+            name: S('string', 'Nombre descriptivo opcional. Si no se proporciona, el backend lo genera automáticamente.'),
+            posted_at: S('string', 'Fecha ISO-8601. Default: hoy.'),
+            description: S('string', 'Descripción adicional opcional.'),
           },
-          required: ['amount', 'category', 'name'],
+          required: ['amount'],
         },
       },
       {
         name: 'register_income',
-        description: 'Registra un ingreso del usuario (sueldo, venta, freelance, transferencia recibida). Los ingresos NO tienen categoría.',
+        description: 'Registra un ingreso del usuario (sueldo, venta, freelance, transferencia recibida). Los ingresos NO tienen categoría. Llamar directamente cuando el usuario menciona que recibió dinero.',
         parameters: {
           type: 'object' as any,
           properties: {
             amount: S('number', 'Monto del ingreso en CLP'),
-            source: S('string', 'Fuente del ingreso. Ej: "Sueldo Marzo", "Venta Bicicleta", "Freelance Diseño"'),
+            source: S('string', 'Fuente del ingreso. Si no se especifica, usar "Ingreso". Ej: "Sueldo", "Venta Bicicleta", "Freelance"'),
             posted_at: S('string', 'Fecha ISO-8601. Default: hoy'),
-            recurring: S('boolean', 'true si es ingreso recurrente (sueldo mensual, arriendo, etc.)'),
-            period: S('string', 'Periodicidad si es recurrente: "weekly" o "monthly"'),
           },
-          required: ['amount', 'source'],
+          required: ['amount'],
         },
       },
       {

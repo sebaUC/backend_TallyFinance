@@ -9,13 +9,15 @@ export async function registerExpense(
   userId: string,
   args: {
     amount: number;
-    category: string;
-    name: string;
+    category?: string;
+    name?: string;
     posted_at?: string;
     description?: string;
   },
 ): Promise<Record<string, any>> {
-  const { amount, category, name, description } = args;
+  const { amount, description } = args;
+  const category = args.category || 'Sin categoría';
+  const name = args.name || category;
 
   // Default date to Chile timezone
   const postedAt =
@@ -28,15 +30,40 @@ export async function registerExpense(
     .select('id, name')
     .eq('user_id', userId);
 
-  const matched = findCategory(category, categories || []);
+  let matched = findCategory(category, categories || []);
+
+  // If category doesn't exist, create it automatically
+  if (!matched && category && category !== 'Sin categoría') {
+    const { data: created, error: createErr } = await supabase
+      .from('categories')
+      .insert({
+        user_id: userId,
+        name: category.charAt(0).toUpperCase() + category.slice(1),
+        icon: null, // Gemini sets this via manage_category if needed
+        budget: 0,
+      })
+      .select('id, name')
+      .single();
+
+    if (!createErr && created) {
+      matched = created;
+    } else {
+      return {
+        ok: false,
+        error: 'CATEGORY_CREATE_FAILED',
+        attemptedCategory: category,
+        availableCategories: (categories || []).map((c) => c.name),
+      };
+    }
+  }
+
+  // If still no match (e.g., "Sin categoría" or empty), use first available
+  if (!matched && categories?.length) {
+    matched = categories[0];
+  }
 
   if (!matched) {
-    return {
-      ok: false,
-      error: 'CATEGORY_NOT_FOUND',
-      attemptedCategory: category,
-      availableCategories: (categories || []).map((c) => c.name),
-    };
+    return { ok: false, error: 'NO_CATEGORIES', message: 'No tienes categorías configuradas.' };
   }
 
   // 2. Get default account

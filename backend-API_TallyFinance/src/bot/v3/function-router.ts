@@ -4,6 +4,7 @@
  */
 import { SupabaseClient } from '@supabase/supabase-js';
 import { registerExpense } from './functions/register-expense.fn.js';
+import { registerIncome } from './functions/register-income.fn.js';
 
 export function createFunctionRouter(supabase: SupabaseClient, userId: string) {
   return async (name: string, args: Record<string, any>): Promise<Record<string, any>> => {
@@ -11,9 +12,8 @@ export function createFunctionRouter(supabase: SupabaseClient, userId: string) {
       case 'register_expense':
         return registerExpense(supabase, userId, args as any);
 
-      // TODO: Implement remaining functions
       case 'register_income':
-        return { ok: false, error: 'NOT_IMPLEMENTED', message: 'register_income coming soon' };
+        return registerIncome(supabase, userId, args as any);
 
       case 'query_transactions':
         return { ok: false, error: 'NOT_IMPLEMENTED', message: 'query_transactions coming soon' };
