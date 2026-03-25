@@ -218,6 +218,74 @@ export class BotController implements OnModuleInit {
 
     try {
       this.log.debug(`[TG] DomainMessage text="${domainMsg.text}" media=${domainMsg.media?.length ?? 0}`);
+
+      // ── V3 Pipeline: Gemini Function Calling ──
+      const useV3 = process.env.BOT_V3 === '1';
+
+      if (useV3) {
+        const userId = await this.channels.getUserIdByExternalId(domainMsg.externalId, 'telegram');
+        if (!userId) {
+          stopTyping();
+          await this.tg.sendReply(domainMsg, 'No tienes cuenta vinculada. Regístrate en tallyfinance.vercel.app', {});
+          return 'OK';
+        }
+
+        const { GeminiClient } = await import('./v3/gemini.client.js');
+        const { botTools } = await import('./v3/function-declarations.js');
+        const { createFunctionRouter } = await import('./v3/function-router.js');
+        const { conversations } = await import('./gemini-v3-prototype.js');
+        const fs = await import('fs');
+        const path = await import('path');
+
+        const apiKey = process.env.GEMINI_API_KEY;
+        if (!apiKey) { stopTyping(); return 'OK'; }
+
+        // Load context
+        let displayName = 'Usuario', tone = 'neutral', mood = 'normal';
+        let categories: string[] = [], budget = 'Sin presupuesto activo';
+        try {
+          const ctx = await this.userContext.getContext(userId);
+          displayName = ctx.displayName || 'Usuario';
+          tone = ctx.personality?.tone || 'neutral';
+          mood = ctx.personality?.mood || 'normal';
+          categories = (ctx.categories || []).map((c: any) => c.name);
+          if (ctx.activeBudget?.amount) budget = `${ctx.activeBudget.period}: $${Math.round(ctx.activeBudget.amount).toLocaleString('es-CL')}`;
+        } catch {}
+
+        // System prompt
+        let systemPrompt: string;
+        try {
+          systemPrompt = fs.readFileSync(path.join(__dirname, 'v3', 'prompts', 'gus_system.txt'), 'utf-8');
+        } catch {
+          systemPrompt = 'Eres Gus, asistente financiero. Tono: {tone}.';
+        }
+        systemPrompt = systemPrompt
+          .replace('{tone}', tone).replace('{mood}', mood)
+          .replace('{displayName}', displayName)
+          .replace('{categories}', categories.join(', ') || 'Sin categorías')
+          .replace('{budget}', budget);
+
+        // Conversation
+        if (!conversations.has(userId)) conversations.set(userId, []);
+        const history = conversations.get(userId)!;
+        const userParts = [{ text: domainMsg.text || '' }];
+        history.push({ role: 'user', parts: userParts });
+
+        const supabase = (this.userContext as any).supabase;
+        const client = new GeminiClient(apiKey);
+        const executeFn = createFunctionRouter(supabase, userId);
+
+        const result = await client.chat(systemPrompt, history.slice(0, -1), userParts, botTools, executeFn);
+
+        history.push({ role: 'model', parts: [{ text: result.reply }] });
+        while (history.length > 50) history.shift();
+
+        stopTyping();
+        await this.tg.sendReply(domainMsg, result.reply, { parseMode: 'HTML' });
+        return 'OK';
+      }
+
+      // ── V2 Pipeline (legacy) ──
       const replies = await this.bot.handle(domainMsg);
       stopTyping();
       await this.sendTgReplies(domainMsg, replies);
