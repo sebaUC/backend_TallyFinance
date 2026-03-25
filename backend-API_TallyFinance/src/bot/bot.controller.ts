@@ -312,50 +312,135 @@ export class BotController implements OnModuleInit {
     }
   }
 
-  // ── V3 Prototype: Gemini Function Calling (dry run) ──
+  // ── V3: Gemini Function Calling (real execution) ──
 
   @Post('bot/test-v3')
-  async testV3(@Body() body: { message: string; userId: string; reset?: boolean }) {
+  async testV3(
+    @Body() body: { message: string; userId: string; reset?: boolean; dryRun?: boolean },
+  ) {
     if (!body.message || !body.userId) {
       return { ok: false, error: 'Missing required fields: message, userId' };
     }
 
-    const { chatV3, resetV3Conversation } = await import('./gemini-v3-prototype.js');
-
-    if (body.reset) {
-      resetV3Conversation(body.userId);
-      return { ok: true, message: 'Conversation reset' };
+    // Dry run mode: use prototype mock functions
+    if (body.dryRun) {
+      const { chatV3, resetV3Conversation } = await import('./gemini-v3-prototype.js');
+      if (body.reset) { resetV3Conversation(body.userId); return { ok: true, message: 'Reset' }; }
+      let uc = { displayName: 'Usuario', tone: 'toxic', mood: 'normal', categories: ['Alimentación', 'Transporte', 'Personal', 'Salud', 'Educación', 'Hogar'] };
+      try { const ctx = await this.userContext.getContext(body.userId); uc = { displayName: ctx.displayName || 'Usuario', tone: ctx.personality?.tone || 'toxic', mood: ctx.personality?.mood || 'normal', categories: (ctx.categories || []).map((c: any) => c.name) }; } catch {}
+      const r = await chatV3(body.userId, body.message, uc);
+      return { ok: true, reply: r.reply, functionsCalled: r.functionsCalled, tokensUsed: r.tokensUsed, mode: 'dry-run' };
     }
 
-    // Load user context for system prompt
-    let userContext = {
-      displayName: 'Usuario',
-      tone: 'toxic',
-      mood: 'normal',
-      categories: ['Alimentación', 'Transporte', 'Personal', 'Salud', 'Educación', 'Hogar'],
-    };
+    // Real mode: Gemini + Supabase
+    const { GeminiClient } = await import('./v3/gemini.client.js');
+    const { botTools } = await import('./v3/function-declarations.js');
+    const { createFunctionRouter } = await import('./v3/function-router.js');
+    const fs = await import('fs');
+    const path = await import('path');
+
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) return { ok: false, error: 'GEMINI_API_KEY not configured' };
+
+    // Load user context
+    let displayName = 'Usuario';
+    let tone = 'toxic';
+    let mood = 'normal';
+    let categories: string[] = [];
+    let budget = 'Sin presupuesto activo';
 
     try {
       const ctx = await this.userContext.getContext(body.userId);
-      userContext = {
-        displayName: ctx.displayName || 'Usuario',
-        tone: ctx.personality?.tone || 'toxic',
-        mood: ctx.personality?.mood || 'normal',
-        categories: (ctx.categories || []).map((c: any) => c.name),
-      };
+      displayName = ctx.displayName || 'Usuario';
+      tone = ctx.personality?.tone || 'toxic';
+      mood = ctx.personality?.mood || 'normal';
+      categories = (ctx.categories || []).map((c: any) => c.name);
+      if (ctx.activeBudget?.amount) {
+        budget = `${ctx.activeBudget.period}: $${Math.round(ctx.activeBudget.amount).toLocaleString('es-CL')}`;
+      }
+    } catch {}
+
+    // Build system prompt
+    let systemPrompt: string;
+    try {
+      const promptPath = path.join(__dirname, 'v3', 'prompts', 'gus_system.txt');
+      systemPrompt = fs.readFileSync(promptPath, 'utf-8');
     } catch {
-      // Use defaults
+      // Fallback: inline minimal prompt
+      systemPrompt = 'Eres Gus, asistente financiero de TallyFinance. Tono: {tone}. Mood: {mood}.';
+    }
+    systemPrompt = systemPrompt
+      .replace('{tone}', tone)
+      .replace('{mood}', mood)
+      .replace('{displayName}', displayName)
+      .replace('{categories}', categories.join(', ') || 'Sin categorías')
+      .replace('{budget}', budget);
+
+    // Conversation history (in-memory for now — Redis later)
+    const { chatV3: _ignore, resetV3Conversation } = await import('./gemini-v3-prototype.js');
+
+    // Use in-memory conversation from prototype (shared store)
+    // TODO: Move to Redis-backed conversation service
+    const convModule = await import('./gemini-v3-prototype.js');
+
+    if (body.reset) {
+      convModule.resetV3Conversation(body.userId);
+      return { ok: true, message: 'Conversation reset' };
     }
 
+    // Get Supabase client from the UserContextService's injected instance
+    const supabase = (this.userContext as any).supabase;
+    if (!supabase) return { ok: false, error: 'Supabase client not available' };
+
+    const client = new GeminiClient(apiKey);
+    const executeFunction = createFunctionRouter(supabase, body.userId);
+
+    // Get conversation history (in-memory from prototype for now)
+    const conversations = (convModule as any).conversations || new Map();
+    if (!conversations.has(body.userId)) conversations.set(body.userId, []);
+    const history = conversations.get(body.userId)!;
+
+    const userParts = [{ text: body.message }];
+
     try {
-      const result = await chatV3(body.userId, body.message, userContext);
+      // Add user message to history
+      history.push({ role: 'user', parts: userParts });
+
+      const result = await client.chat(
+        systemPrompt,
+        history.slice(0, -1), // all except current
+        userParts,
+        botTools,
+        executeFunction,
+      );
+
+      // Add model response to history
+      history.push({ role: 'model', parts: [{ text: result.reply }] });
+
+      // Add function calls to history (for context)
+      for (const fc of result.functionsCalled) {
+        // These are already in the chat via sendMessage, but we track them
+      }
+
+      // Trim history
+      while (history.length > 50) history.shift();
+
       return {
         ok: true,
         reply: result.reply,
-        functionsCalled: result.functionsCalled,
+        functionsCalled: result.functionsCalled.map((fc) => ({
+          name: fc.name,
+          args: fc.args,
+          result: fc.result,
+        })),
         tokensUsed: result.tokensUsed,
+        mode: 'real',
       };
     } catch (err) {
+      // Remove the user message we added if it failed
+      if (history.length && history[history.length - 1]?.role === 'user') {
+        history.pop();
+      }
       return { ok: false, error: String(err) };
     }
   }

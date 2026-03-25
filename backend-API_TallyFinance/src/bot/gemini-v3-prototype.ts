@@ -310,7 +310,7 @@ MODO DRY RUN: Las funciones NO ejecutan realmente — retornan descripciones en 
 // ── Main Chat Function ──
 
 // In-memory conversation store (per session)
-const conversations = new Map<string, Content[]>();
+export const conversations = new Map<string, Content[]>();
 
 export async function chatV3(
   userId: string,
