@@ -34,7 +34,7 @@ export async function registerExpense(
   // 1. Match category
   const { data: categories } = await supabase
     .from('categories')
-    .select('id, name')
+    .select('id, name, icon')
     .eq('user_id', userId);
 
   let matched = findCategory(category, categories || []);
@@ -109,6 +109,7 @@ export async function registerExpense(
       id: inserted?.id,
       amount: Math.round(amount * 100) / 100,
       category: matched!.name,
+      icon: matched!.icon || null,
       name,
       posted_at: postedAt,
       description: description ?? null,
@@ -121,8 +122,8 @@ export async function registerExpense(
 
 function findCategory(
   input: string,
-  categories: { id: string; name: string }[],
-): { id: string; name: string } | null {
+  categories: { id: string; name: string; icon?: string }[],
+): { id: string; name: string; icon?: string } | null {
   if (!input || !categories.length) return null;
   const lower = input.toLowerCase().trim();
 

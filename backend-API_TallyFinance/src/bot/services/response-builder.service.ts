@@ -68,7 +68,7 @@ export class ResponseBuilderService {
           data?.transaction?.name ??
           (data?.type === 'income' ? 'Ingreso' : 'Gasto');
         const category = data?.category ?? data?.transaction?.category;
-        const icon = this.getCategoryIcon(category);
+        const icon = data?.icon ?? data?.transaction?.icon ?? this.getCategoryIcon(category);
         const date = this.formatDate(
           data?.posted_at ?? data?.transaction?.posted_at,
         );
@@ -90,7 +90,8 @@ export class ResponseBuilderService {
       case 'manage_categories': {
         if (op === 'create' || op === 'create_and_register') {
           const catName = data?.category?.name ?? data?.name ?? '';
-          let text = `✅ Categoría <b>${this.escapeHtml(catName)}</b> creada`;
+          const catIcon = data?.category?.icon ?? data?.icon ?? '';
+          let text = `✅ Categoría ${catIcon} <b>${this.escapeHtml(catName)}</b> creada`;
           if (op === 'create_and_register' && data?.transaction) {
             const txAmount = data.transaction.amount ?? 0;
             text += `\n✅ <b>$${this.formatCLP(txAmount)}</b> registrado en <b>${this.escapeHtml(catName)}</b>`;
@@ -112,7 +113,7 @@ export class ResponseBuilderService {
           if (categories.length === 0) return 'No tienes categorías aún.';
           return (
             `📂 <b>Tus categorías:</b>\n` +
-            categories.map((c) => `• ${this.escapeHtml(c.name)}`).join('\n')
+            categories.map((c) => `${c.icon || '📌'} ${this.escapeHtml(c.name)}`).join('\n')
           );
         }
         return `✅ Categoría actualizada`;
