@@ -155,9 +155,17 @@ export class BotController implements OnModuleInit {
     try {
       this.log.debug(`[WA] DomainMessage text="${domainMsg.text}" media=${domainMsg.media?.length ?? 0}`);
 
+      // Handle /start command (channel linking)
+      const startHandled = await this.channels.handleStartCommand(domainMsg);
+      if (startHandled) {
+        await this.wa.sendReply(domainMsg, startHandled, { parseMode: 'HTML' });
+        return 'EVENT_RECEIVED';
+      }
+
       const userId = await this.channels.getUserIdByExternalId(domainMsg.externalId, 'whatsapp');
       if (!userId) {
-        await this.wa.sendReply(domainMsg, 'No tienes cuenta vinculada. Regístrate en tallyfinance.vercel.app', {});
+        const linkReply = await this.channels.buildLinkReply(domainMsg);
+        await this.wa.sendReply(domainMsg, linkReply, { parseMode: 'HTML' });
         return 'EVENT_RECEIVED';
       }
 
@@ -229,10 +237,20 @@ export class BotController implements OnModuleInit {
     try {
       this.log.debug(`[TG] DomainMessage text="${domainMsg.text}" media=${domainMsg.media?.length ?? 0}`);
 
+      // Handle /start command (channel linking) — BEFORE userId lookup
+      const startHandled = await this.channels.handleStartCommand(domainMsg);
+      if (startHandled) {
+        stopTyping();
+        await this.tg.sendReply(domainMsg, startHandled, { parseMode: 'HTML' });
+        return 'OK';
+      }
+
       const userId = await this.channels.getUserIdByExternalId(domainMsg.externalId, 'telegram');
       if (!userId) {
         stopTyping();
-        await this.tg.sendReply(domainMsg, 'No tienes cuenta vinculada. Regístrate en tallyfinance.vercel.app', {});
+        // Build link reply with code for unlinked users
+        const linkReply = await this.channels.buildLinkReply(domainMsg);
+        await this.tg.sendReply(domainMsg, linkReply, { parseMode: 'HTML' });
         return 'OK';
       }
 
