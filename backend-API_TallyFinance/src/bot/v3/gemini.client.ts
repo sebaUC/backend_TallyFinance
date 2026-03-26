@@ -25,7 +25,7 @@ export type FunctionExecutor = (
   args: Record<string, any>,
 ) => Promise<Record<string, any>>;
 
-const MAX_FUNCTION_LOOPS = 5;
+const MAX_FUNCTION_LOOPS = 10;
 
 export class GeminiClient {
   private readonly log = new Logger(GeminiClient.name);
