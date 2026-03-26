@@ -173,7 +173,7 @@ export class BotV3Service {
       .replace('{accounts}', accounts);
 
     // 3b. Quick responses (no Gemini call needed)
-    const quickReply = this.checkQuickResponse(text);
+    const quickReply = this.checkQuickResponse(text, tone);
     if (quickReply) {
       return {
         reply: quickReply,
@@ -387,9 +387,19 @@ export class BotV3Service {
   private static readonly DASHBOARD_URL = 'https://frontend-tally-finance.vercel.app/app';
   private static readonly DASHBOARD_PATTERN = /\b(dashboard|link|web|app|página|pagina|sitio|reporte|reportes|configurar|configuración)\b/i;
 
-  private checkQuickResponse(text: string): string | null {
+  private static readonly DASHBOARD_MSGS: Record<string, string> = {
+    neutral: `Acá está tu dashboard → LINK\n\nResumen de gastos, gráficos por categoría, presupuesto y cuentas.`,
+    friendly: `Dale, acá lo tienes 😊\n\n👉 LINK\n\nPuedes ver tus gastos, gráficos, categorías y configurar tu presupuesto. Pásate! 🚀`,
+    serious: `LINK\n\nAcceso a resumen financiero, desglose por categoría, presupuesto y configuración de cuentas.`,
+    motivational: `¡Tu centro de control financiero! 💪\n\n👉 LINK\n\nRevisa tus gastos, analiza tus gráficos y ajusta tu presupuesto. Todo el poder en tus manos 🔥`,
+    strict: `LINK\nResumen, gráficos, presupuesto, cuentas.`,
+    toxic: `¿No lo tenías guardado? 🙃\n\n👉 LINK\n\nAhí puedes ver cuánto llevas quemado este mes, tus categorías favoritas de derroche y configurar un presupuesto que probablemente no vas a respetar 💀`,
+  };
+
+  private checkQuickResponse(text: string, tone: string): string | null {
     if (BotV3Service.DASHBOARD_PATTERN.test(text)) {
-      return `Tu dashboard está acá 👉 ${BotV3Service.DASHBOARD_URL}\n\nAhí puedes ver tu resumen de gastos, gráficos por categoría, configurar presupuesto y gestionar tus cuentas.`;
+      const template = BotV3Service.DASHBOARD_MSGS[tone] || BotV3Service.DASHBOARD_MSGS.neutral;
+      return template.replace(/LINK/g, BotV3Service.DASHBOARD_URL);
     }
     return null;
   }
