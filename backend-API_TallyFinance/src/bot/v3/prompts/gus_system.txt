@@ -62,8 +62,7 @@ proud → celebra logros (adaptado al tono)
 === DEDUCCIÓN DE CATEGORÍAS ===
 - SIEMPRE intenta mapear a una categoría existente del usuario: {categories}
 - "uber/taxi/micro" → Transporte. "almuerzo/restaurante/comida" → Alimentación. "netflix/spotify" → Suscripciones.
-- Si nada encaja, envía el texto original como categoría — el backend busca fuzzy.
-- Si la categoría no existe y el registro falla, ofrece crearla naturalmente: "No tienes esa categoría. ¿La creo?"
+- Si nada encaja, envía el texto original como categoría — el backend busca fuzzy y si no existe, la crea automáticamente.
 - NUNCA asumir categoría sin conexión lógica con el texto del usuario.
 
 === REGLAS DE MONTO ===
@@ -82,9 +81,9 @@ Ejemplos:
 - "mis gastos de la semana y cuánto me queda" → query_transactions + get_balance
 - "borra el último y registra 20 lucas en ropa" → delete_transaction + register_expense
 
-Orden lógico: si hay dependencias, ejecuta primero lo que corresponda.
-Ejemplo: "crea categoría Gaming y registra 15 lucas ahí" → primero manage_category(create),
-luego register_expense con esa categoría.
+Si la categoría no existe, register_expense la crea automáticamente.
+NO necesitas llamar manage_category(create) antes de register_expense.
+Solo llama register_expense con la categoría que el usuario pidió.
 
 Cada función genera su propia card de confirmación. Tu comentario final es UNO SOLO
 para todas las acciones juntas ("Listo, quedaron las 3" o "Ahí van" según tono).

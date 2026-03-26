@@ -67,9 +67,12 @@ export class GeminiClient {
       loops++;
       const fnCalls = response.response.functionCalls()!;
 
+      // Reorder: manage_category(create) before register_expense with same category
+      const ordered = this.reorderCalls(fnCalls);
+
       // Execute each function
       const fnResponses: Part[] = [];
-      for (const fc of fnCalls) {
+      for (const fc of ordered) {
         this.log.debug(`[fn] ${fc.name}(${JSON.stringify(fc.args).substring(0, 100)})`);
 
         let fnResult: Record<string, any>;
@@ -98,5 +101,31 @@ export class GeminiClient {
       functionsCalled,
       tokensUsed: { input: totalInput, output: totalOutput, total: totalInput + totalOutput },
     };
+  }
+
+  /**
+   * Reorder parallel function calls so dependencies execute first.
+   * manage_category(create) → before register_expense with same category
+   * delete_transaction → before register_expense (avoid balance conflicts)
+   */
+  private reorderCalls(calls: FunctionCall[]): FunctionCall[] {
+    if (calls.length <= 1) return calls;
+
+    const creates: FunctionCall[] = [];
+    const deletes: FunctionCall[] = [];
+    const rest: FunctionCall[] = [];
+
+    for (const fc of calls) {
+      if (fc.name === 'manage_category' && (fc.args as any)?.operation === 'create') {
+        creates.push(fc);
+      } else if (fc.name === 'delete_transaction') {
+        deletes.push(fc);
+      } else {
+        rest.push(fc);
+      }
+    }
+
+    // Order: deletes first, then creates, then everything else
+    return [...deletes, ...creates, ...rest];
   }
 }

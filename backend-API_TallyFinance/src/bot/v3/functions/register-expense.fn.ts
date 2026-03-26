@@ -36,21 +36,24 @@ export async function registerExpense(
     .select('id, name')
     .eq('user_id', userId);
 
-  const matched = findCategory(category, categories || []);
+  let matched = findCategory(category, categories || []);
 
+  // Auto-create category if not found — algorithmic, no round-trip to Gemini
   if (!matched) {
-    // Return available categories so Gemini can decide:
-    // - suggest the closest one
-    // - or ask the user what to name the new category
-    // - then call manage_category(create) + register_expense again
-    return {
-      ok: false,
-      error: 'CATEGORY_NOT_FOUND',
-      attemptedCategory: category,
-      availableCategories: (categories || []).map((c) => c.name),
-      amount,
-      name,
-    };
+    const { data: created, error: createErr } = await supabase
+      .from('categories')
+      .insert({ user_id: userId, name: category })
+      .select('id, name')
+      .single();
+
+    if (createErr || !created) {
+      return {
+        ok: false,
+        error: 'CATEGORY_CREATE_FAILED',
+        message: `No pude crear la categoría "${category}".`,
+      };
+    }
+    matched = created;
   }
 
   // 2. Get default account
@@ -93,15 +96,21 @@ export async function registerExpense(
     p_delta: -Math.abs(amount),
   });
 
+  // Check if category was just auto-created (not in original list)
+  const wasAutoCreated = !(categories || []).some(
+    (c) => c.id === matched!.id,
+  );
+
   return {
     ok: true,
     data: {
       id: inserted?.id,
       amount: Math.round(amount * 100) / 100,
-      category: matched.name,
+      category: matched!.name,
       name,
       posted_at: postedAt,
       description: description ?? null,
+      ...(wasAutoCreated ? { categoryCreated: true } : {}),
     },
   };
 }
