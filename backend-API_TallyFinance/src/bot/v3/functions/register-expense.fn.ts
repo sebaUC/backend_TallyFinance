@@ -26,10 +26,10 @@ export async function registerExpense(
   const category = args.category || 'Sin categoría';
   const name = args.name || category;
 
-  // Default date to Chile timezone
+  // Default date+time in Chile timezone (ISO format)
   const postedAt =
     args.posted_at ||
-    new Date().toLocaleDateString('sv-SE', { timeZone: 'America/Santiago' });
+    new Date().toLocaleString('sv-SE', { timeZone: 'America/Santiago' }).replace(' ', 'T');
 
   // 1. Match category
   const { data: categories } = await supabase

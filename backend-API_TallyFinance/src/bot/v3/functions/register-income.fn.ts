@@ -22,7 +22,7 @@ export async function registerIncome(
   const source = args.source || 'Ingreso';
   const postedAt =
     args.posted_at ||
-    new Date().toLocaleDateString('sv-SE', { timeZone: 'America/Santiago' });
+    new Date().toLocaleString('sv-SE', { timeZone: 'America/Santiago' }).replace(' ', 'T');
 
   // Get default account
   const { data: account } = await supabase
