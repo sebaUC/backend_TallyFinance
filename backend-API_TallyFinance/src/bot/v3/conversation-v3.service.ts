@@ -21,7 +21,15 @@ export class ConversationV3Service {
     try {
       const json = await this.redis.get(CONV_KEY(userId));
       if (!json) return [];
-      return JSON.parse(json);
+      let history = JSON.parse(json);
+
+      // Gemini requires history to start with role 'user'.
+      // Drop leading non-user entries from corrupted/trimmed histories.
+      while (history.length > 0 && history[0].role !== 'user') {
+        history = history.slice(1);
+      }
+
+      return history;
     } catch (err) {
       this.log.warn(`[getHistory] Redis error for ${userId}`, err);
       return [];
@@ -45,9 +53,15 @@ export class ConversationV3Service {
       });
 
       // FIFO trim
-      const trimmed = cleaned.length > MAX_ENTRIES
+      let trimmed = cleaned.length > MAX_ENTRIES
         ? cleaned.slice(cleaned.length - MAX_ENTRIES)
         : cleaned;
+
+      // Gemini requires history to start with role 'user'.
+      // After trimming, drop leading non-user entries to avoid crash.
+      while (trimmed.length > 0 && trimmed[0].role !== 'user') {
+        trimmed = trimmed.slice(1);
+      }
 
       await this.redis.set(CONV_KEY(userId), JSON.stringify(trimmed), TTL);
     } catch (err) {
