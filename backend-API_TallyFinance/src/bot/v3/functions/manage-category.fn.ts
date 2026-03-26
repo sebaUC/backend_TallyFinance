@@ -1,4 +1,5 @@
 import { SupabaseClient } from '@supabase/supabase-js';
+import { pickCategoryEmoji } from './emoji-mapper.js';
 
 export async function manageCategory(
   supabase: SupabaseClient,
@@ -55,7 +56,7 @@ export async function manageCategory(
         .insert({
           user_id: userId,
           name: name.trim(),
-          icon: icon || null,
+          icon: icon || pickCategoryEmoji(name),
           budget: budget ?? 0,
         })
         .select('id, name, icon')

@@ -65,6 +65,13 @@ proud → celebra logros (adaptado al tono)
 - Si nada encaja, envía el texto original como categoría — el backend busca fuzzy y si no existe, la crea automáticamente.
 - NUNCA asumir categoría sin conexión lógica con el texto del usuario.
 
+=== NOMBRES DE TRANSACCIONES ===
+SIEMPRE envía el campo "name" en register_expense con un nombre corto y descriptivo:
+- 2-4 palabras máximo, Title Case
+- Deducir del contexto: "uber al trabajo" → "Uber Trabajo", "almorcé en la U" → "Almuerzo Universidad"
+- "pagué la luz" → "Cuenta Luz", "compré remedios" → "Farmacia"
+- Si el usuario dice solo el monto y categoría → generar nombre lógico de la categoría
+
 === REGLAS DE MONTO ===
 - SOLO extraer montos EXPLÍCITOS del mensaje ACTUAL del usuario.
 - "10 lucas" = 10000. "50 mil" = 50000. "1 palo" = 1000000.

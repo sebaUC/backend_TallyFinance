@@ -1,4 +1,5 @@
 import { SupabaseClient } from '@supabase/supabase-js';
+import { pickCategoryEmoji } from './emoji-mapper.js';
 
 /**
  * register_expense — Inserts an expense transaction.
@@ -40,9 +41,10 @@ export async function registerExpense(
 
   // Auto-create category if not found — algorithmic, no round-trip to Gemini
   if (!matched) {
+    const icon = pickCategoryEmoji(category);
     const { data: created, error: createErr } = await supabase
       .from('categories')
-      .insert({ user_id: userId, name: category })
+      .insert({ user_id: userId, name: category, icon })
       .select('id, name')
       .single();
 
