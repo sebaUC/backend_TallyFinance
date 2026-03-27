@@ -36,15 +36,28 @@ export async function registerExpense(
     .select('id, name, icon, budget')
     .eq('user_id', userId);
 
-  let matched = findCategory(category, categories || []);
+  const findResult = findCategory(category, categories || []);
+  let matched: { id: string; name: string; icon?: string } | null = null;
 
-  // Auto-create category if not found — algorithmic, no round-trip to Gemini
-  if (!matched) {
+  if (findResult.type === 'exact' || findResult.type === 'synonym') {
+    // Sure match — use it directly
+    matched = findResult.category!;
+  } else if (findResult.type === 'similar') {
+    // Possible match — return suggestion to Gemini so it can ask the user
+    return {
+      ok: false,
+      error: 'CATEGORY_AMBIGUOUS',
+      message: `No encontré "${category}" exactamente, pero tienes "${findResult.suggestion!.name}". ¿Uso esa o creo "${category}" como nueva?`,
+      suggestion: findResult.suggestion!.name,
+      original: category,
+    };
+  } else {
+    // No match at all — auto-create
     const icon = pickCategoryEmoji(category);
     const { data: created, error: createErr } = await supabase
       .from('categories')
       .insert({ user_id: userId, name: category, icon })
-      .select('id, name')
+      .select('id, name, icon')
       .single();
 
     if (createErr || !created) {
@@ -281,29 +294,80 @@ async function computePostExpenseContext(
 
 // ── Category matching (exact → substring → typo tolerance) ──
 
+/**
+ * Synonym map: common alternative names → canonical category name.
+ * If user says "comida" and category is "Alimentación", it's a sure match.
+ */
+const SYNONYMS: Record<string, string[]> = {
+  alimentación: ['comida', 'comer', 'almuerzo', 'cena', 'desayuno', 'restaurante', 'cocina', 'food'],
+  alimentacion: ['comida', 'comer', 'almuerzo', 'cena', 'desayuno', 'restaurante', 'cocina', 'food'],
+  transporte: ['uber', 'taxi', 'metro', 'bus', 'micro', 'bencina', 'gasolina', 'didi', 'cabify', 'movilización'],
+  salud: ['doctor', 'médico', 'farmacia', 'remedios', 'clínica', 'dentista', 'hospital', 'isapre'],
+  entretenimiento: ['cine', 'películas', 'ocio', 'diversión', 'juegos', 'carrete', 'fiesta', 'bar'],
+  educación: ['universidad', 'colegio', 'curso', 'libro', 'clase', 'estudio', 'taller'],
+  educacion: ['universidad', 'colegio', 'curso', 'libro', 'clase', 'estudio', 'taller'],
+  hogar: ['casa', 'arriendo', 'luz', 'agua', 'gas', 'internet', 'limpieza', 'muebles'],
+  suscripciones: ['netflix', 'spotify', 'disney', 'hbo', 'prime', 'streaming', 'membresía'],
+  personal: ['ropa', 'peluquería', 'belleza', 'cuidado', 'regalo'],
+  supermercado: ['super', 'mercado', 'provisiones', 'despensa', 'feria'],
+  tecnología: ['computador', 'notebook', 'celular', 'pc', 'software', 'app'],
+  tecnologia: ['computador', 'notebook', 'celular', 'pc', 'software', 'app'],
+  mascotas: ['perro', 'gato', 'veterinario', 'mascota'],
+  deporte: ['gym', 'gimnasio', 'ejercicio', 'fitness'],
+}
+
+interface FindResult {
+  type: 'exact' | 'synonym' | 'similar' | 'none';
+  category?: { id: string; name: string; icon?: string };
+  suggestion?: { id: string; name: string; icon?: string };
+}
+
 function findCategory(
   input: string,
   categories: { id: string; name: string; icon?: string }[],
-): { id: string; name: string; icon?: string } | null {
-  if (!input || !categories.length) return null;
+): FindResult {
+  if (!input || !categories.length) return { type: 'none' };
   const lower = input.toLowerCase().trim();
 
-  // Exact (case-insensitive)
+  // 1. Exact match (case-insensitive)
   const exact = categories.find((c) => c.name.toLowerCase() === lower);
-  if (exact) return exact;
+  if (exact) return { type: 'exact', category: exact };
 
-  // Substring
+  // 2. Substring match (one contains the other)
   const partial = categories.find((c) => {
     const cl = c.name.toLowerCase();
     return cl.includes(lower) || lower.includes(cl);
   });
-  if (partial) return partial;
+  if (partial) return { type: 'exact', category: partial };
 
-  // Typo tolerance (2-char diff)
+  // 3. Synonym match (comida→Alimentación, uber→Transporte)
+  for (const cat of categories) {
+    const catLower = cat.name.toLowerCase();
+    const syns = SYNONYMS[catLower];
+    if (syns && syns.some((s) => lower.includes(s) || s.includes(lower))) {
+      return { type: 'synonym', category: cat };
+    }
+  }
+
+  // 4. Typo tolerance (2-char diff) — sure match
   const typo = categories.find((c) => isSimilar(lower, c.name.toLowerCase(), 2));
-  if (typo) return typo;
+  if (typo) return { type: 'exact', category: typo };
 
-  return null;
+  // 5. Loose similarity (3-4 char diff) — suggestion, not sure
+  const loose = categories.find((c) => isSimilar(lower, c.name.toLowerCase(), 4));
+  if (loose) return { type: 'similar', suggestion: loose };
+
+  // 6. Reverse synonym: user's category matches a synonym of an existing one
+  for (const cat of categories) {
+    const catLower = cat.name.toLowerCase();
+    for (const [canonical, syns] of Object.entries(SYNONYMS)) {
+      if (catLower === canonical && syns.some((s) => isSimilar(lower, s, 2))) {
+        return { type: 'synonym', category: cat };
+      }
+    }
+  }
+
+  return { type: 'none' };
 }
 
 function isSimilar(a: string, b: string, maxDiff: number): boolean {
