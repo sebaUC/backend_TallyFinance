@@ -114,15 +114,20 @@ export async function editTransaction(
     }
   }
 
+  // Build user-safe updated object (no internal IDs)
+  const safeUpdated: Record<string, any> = {};
+  if (updates.amount !== undefined) safeUpdated.amount = updates.amount;
+  if (updates.name !== undefined) safeUpdated.name = updates.name;
+  if (updates.description !== undefined) safeUpdated.description = updates.description;
+  if (updates.posted_at !== undefined) safeUpdated.posted_at = updates.posted_at;
+  if (updates.category_id !== undefined) safeUpdated.category = new_category || tx.cat_name;
+
   return {
     ok: true,
     data: {
       id: tx.id,
       previous,
-      updated: {
-        ...updates,
-        category: new_category || tx.cat_name,
-      },
+      updated: safeUpdated,
     },
   };
 }

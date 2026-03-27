@@ -299,9 +299,9 @@ export class BotV3Service {
       if (card) replies.push(card);
     }
 
-    // AI comment — always last
+    // AI comment — always last (strip markdown since Telegram doesn't render it)
     if (result.reply?.trim()) {
-      replies.push({ text: result.reply });
+      replies.push({ text: BotV3Service.stripMarkdown(result.reply) });
     }
 
     if (replies.length === 0) {
@@ -341,9 +341,7 @@ export class BotV3Service {
       case 'edit_transaction':
         return rb.buildConfirmation('manage_transactions', {
           operation: 'edit', id: data.id,
-          changes: Object.keys(data.updated || {}).map(
-            (k) => `${k}: ${data.previous?.[k]} → ${data.updated?.[k]}`,
-          ),
+          changes: this.sanitizeEditChanges(data.updated, data.previous),
         }, data.id);
 
       case 'query_transactions': {
@@ -392,7 +390,7 @@ export class BotV3Service {
     friendly: `Dale, acá lo tienes 😊\n\n👉 LINK\n\nPuedes ver tus gastos, gráficos, categorías y configurar tu presupuesto. Pásate! 🚀`,
     serious: `LINK\n\nAcceso a resumen financiero, desglose por categoría, presupuesto y configuración de cuentas.`,
     motivational: `¡Tu centro de control financiero! 💪\n\n👉 LINK\n\nRevisa tus gastos, analiza tus gráficos y ajusta tu presupuesto. Todo el poder en tus manos 🔥`,
-    strict: `LINK\nResumen, gráficos, presupuesto, cuentas.`,
+    strict: `Tu dashboard está acá → LINK\n\nRevisa tu resumen de gastos, gráficos por categoría y el estado de tu presupuesto. No hay excusas para no saber en qué se te va la plata.`,
     toxic: `¿No lo tenías guardado? 🙃\n\n👉 LINK\n\nAhí puedes ver cuánto llevas quemado este mes, tus categorías favoritas de derroche y configurar un presupuesto que probablemente no vas a respetar 💀`,
   };
 
@@ -402,6 +400,65 @@ export class BotV3Service {
       return template.replace(/LINK/g, BotV3Service.DASHBOARD_URL);
     }
     return null;
+  }
+
+  // ── Security: sanitize edit changes for user-facing display ──
+
+  private static readonly FIELD_LABELS: Record<string, string> = {
+    amount: 'Monto',
+    name: 'Nombre',
+    description: 'Descripción',
+    posted_at: 'Fecha',
+    category: 'Categoría',
+    category_id: 'Categoría',
+  };
+
+  private static readonly UUID_RE = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
+
+  /** Strip markdown formatting that Telegram can't render */
+  private static stripMarkdown(text: string): string {
+    return text
+      .replace(/\*\*(.+?)\*\*/g, '$1')  // **bold** → bold
+      .replace(/\*(.+?)\*/g, '$1')      // *bold* → bold
+      .replace(/__(.+?)__/g, '$1')      // __underline__
+      .replace(/_(.+?)_/g, '$1')        // _italic_
+      .replace(/`(.+?)`/g, '$1')        // `code`
+      .replace(/```[\s\S]*?```/g, '');  // code blocks
+  }
+
+  private sanitizeEditChanges(
+    updated: Record<string, any> | undefined,
+    previous: Record<string, any> | undefined,
+  ): string[] {
+    if (!updated) return [];
+    const rb = this.responseBuilder;
+    return Object.keys(updated)
+      .filter((k) => !k.endsWith('_id')) // Never show internal ID fields
+      .map((k) => {
+        const label = BotV3Service.FIELD_LABELS[k] || k;
+        let prev = previous?.[k];
+        let next = updated[k];
+
+        // Strip UUIDs from values
+        if (typeof prev === 'string' && BotV3Service.UUID_RE.test(prev)) prev = undefined;
+        if (typeof next === 'string' && BotV3Service.UUID_RE.test(next)) next = undefined;
+
+        // Format amounts
+        if (k === 'amount') {
+          prev = prev != null ? `$${rb.formatCLP(Number(prev))}` : undefined;
+          next = next != null ? `$${rb.formatCLP(Number(next))}` : undefined;
+        }
+
+        // Format dates
+        if (k === 'posted_at') {
+          prev = prev ? rb.formatDate(String(prev)) : undefined;
+          next = next ? rb.formatDate(String(next)) : undefined;
+        }
+
+        const prevStr = prev ?? '—';
+        const nextStr = next ?? '—';
+        return `${label}: ${prevStr} → ${nextStr}`;
+      });
   }
 
   // ── Helpers ──

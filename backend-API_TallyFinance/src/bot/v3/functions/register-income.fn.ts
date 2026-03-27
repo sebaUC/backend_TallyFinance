@@ -109,6 +109,9 @@ export async function registerIncome(
     p_delta: Math.abs(amount),
   });
 
+  // Reactive context: balance + budget headroom after income
+  const context = await computePostIncomeContext(supabase, userId, account.id);
+
   return {
     ok: true,
     data: {
@@ -121,7 +124,48 @@ export async function registerIncome(
       linked_to_expectation: !!incomeExpId,
       recurring: args.recurring ?? false,
     },
+    context,
   };
+}
+
+async function computePostIncomeContext(
+  supabase: SupabaseClient,
+  userId: string,
+  accountId: string,
+): Promise<Record<string, any>> {
+  const now = new Date();
+  const todayStr = now.toLocaleDateString('sv-SE', { timeZone: 'America/Santiago' });
+  const [y, m] = todayStr.split('-');
+  const lastDay = new Date(Number(y), Number(m), 0).getDate();
+  const monthStart = `${y}-${m}-01T00:00:00`;
+  const monthEnd = `${y}-${m}-${String(lastDay).padStart(2, '0')}T23:59:59`;
+
+  const [{ data: accountData }, { data: monthExpenses }, { data: budgets }] =
+    await Promise.all([
+      supabase.from('accounts').select('current_balance').eq('id', accountId).single(),
+      supabase.from('transactions').select('amount').eq('user_id', userId)
+        .eq('type', 'expense').gte('posted_at', monthStart).lte('posted_at', monthEnd),
+      supabase.from('spending_expectations').select('period, amount')
+        .eq('user_id', userId).eq('active', true),
+    ]);
+
+  const balance = Math.round(Number(accountData?.current_balance ?? 0));
+  const monthTotal = (monthExpenses || []).reduce((s: number, t: any) => s + Number(t.amount), 0);
+
+  const ctx: Record<string, any> = { accountBalance: balance };
+
+  const monthly = (budgets || []).find((b: any) => b.period === 'monthly');
+  if (monthly && monthly.amount > 0) {
+    const limit = Number(monthly.amount);
+    ctx.budgetMonthly = {
+      limit: Math.round(limit),
+      spent: Math.round(monthTotal),
+      remaining: Math.round(limit - monthTotal),
+      percent: Math.round((monthTotal / limit) * 100),
+    };
+  }
+
+  return ctx;
 }
 
 /** Chile timestamp with timezone offset (e.g. 2026-03-26T17:30:00-03:00) */

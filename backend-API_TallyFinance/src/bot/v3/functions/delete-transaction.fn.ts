@@ -34,11 +34,23 @@ export async function deleteTransaction(
     await supabase.rpc('update_account_balance', { p_account_id: tx.account_id, p_delta: delta });
   }
 
+  // 4. Reactive context: updated balance
+  let accountBalance: number | undefined;
+  if (tx.account_id) {
+    const { data: acc } = await supabase
+      .from('accounts')
+      .select('current_balance')
+      .eq('id', tx.account_id)
+      .single();
+    accountBalance = Math.round(Number(acc?.current_balance ?? 0));
+  }
+
   return {
     ok: true,
     data: {
       deleted: { id: tx.id, amount: tx.amount, category: tx.cat_name ?? null, name: tx.name, type: tx.type },
     },
+    context: { accountBalance },
   };
 }
 
