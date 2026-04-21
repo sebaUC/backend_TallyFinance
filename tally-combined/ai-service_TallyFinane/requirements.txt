@@ -1,7 +1,0 @@
-fastapi
-uvicorn[standard]
-openai
-google-genai
-pydantic
-pydantic-settings
-python-dotenv

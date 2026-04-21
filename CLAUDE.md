@@ -6,69 +6,65 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 TallyFinance is a **personal finance assistant** that operates through Telegram and WhatsApp. Users interact with an AI character called **Gus** — a personality-driven chatbot that registers transactions, checks budgets, tracks goals, and provides financial guidance.
 
-The system follows a two-phase AI orchestration pattern:
-- **Backend (NestJS)** executes database operations and tool handlers
-- **AI Service (FastAPI)** analyzes intent and generates personalized responses
+The system uses **Gemini function calling** for single-pass AI orchestration:
+- **Backend (NestJS)** handles everything: webhooks, database operations, AI calls via Gemini, tool execution, auth, admin
 - **Frontend (React/Vite)** provides web dashboard, onboarding, account linking, and admin tools
 
-**Core Principle:** *"Backend ejecuta, IA entiende/decide/comunica"*
+**Core Principle:** *"One Gemini call per user turn — the model decides what to do and generates the response with personality."*
 
 ## Architecture
 
 ```
-User Message → Channel Adapter → Backend (NestJS) → Phase A (AI) → Tool Handler → Phase B (AI) → Response
+User Message → Channel Adapter → Backend (NestJS) → Gemini (function calling) → Tool Handlers → Response
 ```
+
+Gemini receives the full conversation history, system prompt (with Gus personality + user context), and 9 function declarations. It decides which functions to call, the backend executes them and returns results, then Gemini generates the final personalized response. This all happens in a single chat turn with an automatic function-calling loop (max 10 iterations).
 
 ### Services
 
 | Service | Port | Technology | Hosting | Purpose |
 |---------|------|------------|---------|---------|
-| Backend | 3000 | NestJS 11 / TypeScript 5.7 | Render | Webhooks, DB operations, tool execution, auth, admin |
-| AI Service | 8000 | FastAPI / Python 3.11 | Render (free tier) | Intent analysis, response generation via OpenAI |
+| Backend | 3000 | NestJS 11 / TypeScript 5.7 | Render | Webhooks, DB operations, Gemini AI, tool execution, auth, admin |
 | Frontend | 5173 | React 19 / Vite 7 | Vercel | Web dashboard, onboarding, account linking |
 | Database | — | Supabase (PostgreSQL) | Supabase | Persistent storage + auth |
 | Cache | 6379 | Redis (Upstash / ioredis) | Upstash | Caching, rate limiting, state, locks |
 
-### Two-Phase AI Orchestration
-
-**Phase A (Intent Analysis):** Analyzes user message with slot-fill context + available categories. Returns `tool_call`, `clarification`, or `direct_reply`. Uses OpenAI gpt-4o-mini with temp=0.3, JSON mode.
-
-**Phase B (Response Generation):** Takes tool result + RuntimeContext (metrics, mood, style, cooldowns, summary). Generates personalized message through Gus identity + personality settings. Uses temp=0.7, text mode. Returns `final_message` + metadata (`new_summary`, `did_nudge`, `nudge_type`).
-
-### Bot Orchestration Loop (16 Steps)
+### V3 Bot Pipeline
 
 ```
-1. Handle /start command (Telegram deep links)
+1. Handle /start command (Telegram deep links) or /reset (clear conversation)
 2. Lookup linked user → build link reply if not found
-3. TWO-PHASE DEDUP: check msg:{msgId} → done/processing/new
+3. DEDUP: check msg:{msgId} → done/processing/new
 4. CONCURRENCY LOCK: acquire lock:{userId} (5s TTL)
-5. LOAD ALL STATE in parallel (context, summary, pending, metrics, cooldowns)
-6. Detect user style (regex: lucas, chilenismos, emojis, formal)
-7. Get tool schemas + available categories
-8. PHASE A: AI decides intent → tool_call / clarification / direct_reply
-9. If direct_reply or clarification → return (no Phase B)
-10. GUARDRAILS: validate tool arguments
-11. EXECUTE TOOL HANDLER → ActionResult
-12. Record metrics (if register_transaction + success)
-13. If handler returns userMessage (slot-fill) → save pending → return
-14. PHASE B: AI generates personalized response
-15. Save summary + cooldowns
+5. Check daily token limit (2M tokens/day per user)
+6. Load user context (personality, categories, budgets, accounts)
+7. Build system prompt from template (tone, mood, displayName, categories, budgets, accounts)
+8. Load conversation history from Redis (Gemini Content[] format)
+9. Call Gemini with system prompt + history + user message + function declarations
+10. Gemini function-calling loop: model calls functions → backend executes → returns results → repeat
+11. Save conversation history to Redis (FIFO trim to 50 entries)
+12. Track token usage (daily + monthly counters)
+13. Post-action: record transaction metrics + invalidate context cache on mutations
+14. Log message to bot_message_log (fire-and-forget)
+15. Build BotReply[] (confirmation cards + AI comment)
 16. Release lock, set dedup to "done"
 ```
 
-### Tool System (6 + 1 Fallback)
+### Tool System (9 Functions)
 
-| Tool | Context | DB Tables | Purpose |
-|------|---------|-----------|---------|
-| `register_transaction` | Yes | categories, payment_method, transactions | Record expenses/income with slot-filling |
-| `ask_balance` | Yes | user_prefs, payment_method, transactions, spending_expectations | Spending & budget query |
-| `ask_budget_status` | Yes | spending_expectations | Active budget check (`.maybeSingle()`) |
-| `ask_goal_status` | Yes | goals | Goals progress with % |
-| `ask_app_info` | No | None (static knowledge base) | App info, help, FAQ |
-| `greeting` | No | None | Returns `{ ok: true }` → Phase B generates greeting |
-| `unknown` (fallback) | No | None | Returns userMessage directly (skips Phase B) |
+| Function | DB Tables | Purpose |
+|----------|-----------|---------|
+| `register_expense` | categories, payment_method, transactions | Record expense with auto-category creation + reactive context |
+| `register_income` | payment_method, transactions | Record income (salary, freelance, sales) |
+| `query_transactions` | transactions, categories | List, sum, or count transactions with flexible filters |
+| `edit_transaction` | transactions, categories | Edit any field of an existing transaction (by ID or hints) |
+| `delete_transaction` | transactions | Delete a transaction (by ID or hints) |
+| `manage_category` | categories | List, create, rename, delete, update icon/budget for categories |
+| `get_balance` | payment_method, transactions, spending_expectations | Balance, spending, income, budget status with optional breakdown |
+| `set_balance` | payment_method | Update account balance directly |
+| `get_app_info` | None (static knowledge) | App info, help, FAQ, capabilities |
 
-**Registration:** ToolRegistry has 6 handlers in map + `unknown` as `fallbackHandler`.
+Functions are **pure async functions** with signature `(supabase, userId, args) => result`. They live in `src/bot/v3/functions/` and are routed via a switch in `function-router.ts`. Gemini chooses which to call and can call multiple in parallel per turn.
 
 ## Repository Structure
 
@@ -79,27 +75,46 @@ TallyFinance/
 │   ├── TALLYFINANCE_SYSTEM.md                   # Complete system reference (v2.2, 1100+ lines)
 │   ├── TALLYFINANCE_ENDPOINTS.md                # Consolidated endpoint testing guide
 │   ├── LANDING_PAGE_CONTENT.md                  # Landing page content
-│   └── pruebas-handlers/                        # 7 tool handler test scripts
+│   └── pruebas-handlers/                        # Tool handler test scripts
 │
-├── tally-combined/
-│   ├── backend-API_TallyFinance/                # NestJS backend (68 TS files, ~7,800 lines)
-│   │   ├── CLAUDE.md                            # Backend-specific guidance (835 lines)
-│   │   ├── src/                                 # Source code
-│   │   └── docs/                                # Endpoint & testing guides
-│   │
-│   └── ai-service_TallyFinane/                  # FastAPI AI service (12 files)
-│       ├── CLAUDE.md                            # AI service-specific guidance (507 lines)
-│       ├── app.py, config.py, schemas.py        # Core app
-│       ├── orchestrator.py                      # Phase A/B logic, mood calc
-│       ├── tool_schemas.py                      # 6 tool definitions
-│       ├── debug_logger.py                      # Unified color-coded logger
-│       └── prompts/                             # 4 prompt files (identity, phase A/B, variability)
+├── backend/                                     # NestJS backend
+│   ├── CLAUDE.md                                # Backend-specific guidance
+│   ├── src/
+│   │   └── bot/
+│   │       ├── bot.controller.ts                # Webhook endpoints + rate limiting
+│   │       ├── bot.module.ts                    # All bot providers + adapters
+│   │       ├── contracts.ts                     # DomainMessage type definition
+│   │       ├── adapters/                        # Telegram + WhatsApp adapters
+│   │       ├── delegates/                       # Channel linking service
+│   │       ├── actions/                         # BotReply, action-block types
+│   │       ├── services/                        # Shared services (context, metrics, response-builder, message-log)
+│   │       └── v3/                              # V3 Gemini function calling (active)
+│   │           ├── bot-v3.service.ts            # Main orchestration — dedup, lock, Gemini call, post-action
+│   │           ├── gemini.client.ts             # Gemini SDK wrapper with function-calling loop
+│   │           ├── conversation-v3.service.ts   # Redis-backed conversation history (Content[])
+│   │           ├── function-declarations.ts     # 9 Gemini function declarations (Tool[])
+│   │           ├── function-router.ts           # Routes function calls to handlers
+│   │           ├── prompts/
+│   │           │   └── gus_system.txt           # Gus system prompt template
+│   │           └── functions/                   # Pure function handlers
+│   │               ├── register-expense.fn.ts
+│   │               ├── register-income.fn.ts
+│   │               ├── query-transactions.fn.ts
+│   │               ├── edit-transaction.fn.ts
+│   │               ├── delete-transaction.fn.ts
+│   │               ├── manage-category.fn.ts
+│   │               ├── get-balance.fn.ts
+│   │               ├── set-balance.fn.ts
+│   │               ├── get-app-info.fn.ts
+│   │               ├── emoji-mapper.ts
+│   │               └── shared/                  # Shared utilities (chile-time, date-range, resolve-transaction)
+│   └── docs/                                    # Endpoint & testing guides
 │
 ├── frontend_TallyFinance/                       # React frontend (65 files, ~8,500 lines)
 │   ├── CLAUDE.md                                # Frontend-specific guidance (649 lines)
 │   └── src/                                     # Source code
 │
-├── docker-compose.yml                           # Full stack: redis, ai-service, backend, ngrok
+├── docker-compose.yml                           # Full stack: redis, backend, ngrok
 ├── render.yaml                                  # Render deployment config
 └── Dockerfile.combined                          # Combined deployment option
 ```
@@ -108,7 +123,7 @@ TallyFinance/
 
 ### Backend (NestJS)
 ```bash
-cd tally-combined/backend-API_TallyFinance
+cd backend
 npm install
 npm run start:dev      # Watch mode
 npm run build          # Compile TypeScript (nest build)
@@ -117,13 +132,6 @@ npm run lint           # ESLint with auto-fix
 npm run test           # Jest unit tests
 npm run test:watch     # Watch mode
 npm run test:e2e       # End-to-end tests
-```
-
-### AI Service (FastAPI)
-```bash
-cd tally-combined/ai-service_TallyFinane
-pip install -r requirements.txt
-uvicorn app:app --reload --host 0.0.0.0 --port 8000
 ```
 
 ### Frontend (React/Vite)
@@ -138,19 +146,23 @@ npm run lint           # ESLint
 ### Docker (Full Stack)
 ```bash
 docker-compose up --build
-# Services: redis:6379, ai-service:8000, backend:3000, ngrok:4040
+# Services: redis:6379, backend:3000, ngrok:4040
 ```
 
 ### Testing Endpoints
 ```bash
-# Health checks
-curl http://localhost:8000/health
+# Health check
 curl http://localhost:3000/
 
 # Test bot (simulates message — no channel adapter needed)
 curl -X POST http://localhost:3000/bot/test \
   -H "Content-Type: application/json" \
-  -d '{"channel":"test","externalId":"user-123","text":"gasté 15 lucas en comida"}'
+  -d '{"message":"gasté 15 lucas en comida","userId":"USER_UUID"}'
+
+# Test V3 with conversation reset
+curl -X POST http://localhost:3000/bot/test-v3 \
+  -H "Content-Type: application/json" \
+  -d '{"userId":"USER_UUID","reset":true}'
 ```
 
 ## All Endpoints (30+)
@@ -159,7 +171,7 @@ curl -X POST http://localhost:3000/bot/test \
 | Method | Path | Auth | Purpose |
 |--------|------|------|---------|
 | POST | `/auth/signup` | No | Email/password registration, sets HTTP-only cookies |
-| POST | `/auth/signin` | No | Email/password login, sets cookies, triggers AI warmup |
+| POST | `/auth/signin` | No | Email/password login, sets cookies |
 | POST | `/auth/provider` | No | OAuth flow (Google only — `@IsIn(['google'])`) |
 | GET | `/auth/callback` | No | OAuth callback handler |
 | POST | `/auth/refresh` | Cookie | Refresh access token from refresh_token cookie |
@@ -178,12 +190,13 @@ curl -X POST http://localhost:3000/bot/test \
 | GET | `/connect/:code` | Cookie | Channel linking redirect flow |
 | GET | `/connect/:code/api` | JWT | Channel linking JSON API |
 
-### Bot (webhooks) — 3 endpoints
+### Bot (webhooks) — 4 endpoints
 | Method | Path | Auth | Purpose |
 |--------|------|------|---------|
 | POST | `/telegram/webhook` | No | Telegram Bot API webhook |
 | POST | `/whatsapp/webhook` | No | WhatsApp Cloud API webhook |
-| POST | `/bot/test` | No | Test endpoint (bypasses channel) |
+| POST | `/bot/test` | No | Test endpoint: `{ message, userId, channel?, verbose? }` |
+| POST | `/bot/test-v3` | No | V3 test endpoint with conversation reset support |
 
 ### Users (`/api/users`) — 3 endpoints
 | Method | Path | Auth | Purpose |
@@ -198,12 +211,12 @@ curl -X POST http://localhost:3000/bot/test \
 | GET | `/admin/check` | Verify admin access |
 | GET | `/admin/dashboard?hours=` | Dashboard stats |
 | GET | `/admin/messages?...` | Paginated messages (userId, channel, from, to, hasError) |
-| GET | `/admin/messages/:id` | Message detail with Phase A/B debug |
+| GET | `/admin/messages/:id` | Message detail with debug info |
 | GET | `/admin/users/:userId/chat?limit=` | User chat history |
 | GET | `/admin/users/:userId/profile` | User profile with personality |
 | GET | `/admin/errors?limit=&offset=` | Error messages |
 | GET | `/admin/users` | Active users list |
-| GET | `/admin/usage?month=` | OpenAI API usage analytics |
+| GET | `/admin/usage?month=` | API usage analytics |
 
 ### Frontend API Client Namespaces
 | Namespace | Methods | Usage |
@@ -225,7 +238,7 @@ curl -X POST http://localhost:3000/bot/test \
 | `/admin` | AdminLayout | Admin | Admin dashboard (nested routes) |
 | `/admin/checklist` | AdminChecklist | Admin | Progress tracker |
 | `/admin/docs` | AdminDocs | Admin | HTML docs viewer |
-| `/admin/usage` | AdminUsage | Admin | OpenAI usage charts |
+| `/admin/usage` | AdminUsage | Admin | Usage charts |
 | `/admin/messages` | AdminMessages | Admin | Message browser |
 | `/admin/messages/:id` | AdminMessageDetail | Admin | Message detail |
 
@@ -245,17 +258,18 @@ curl -X POST http://localhost:3000/bot/test \
 
 | Setting | Source | Values |
 |---------|--------|--------|
-| Tone | `personality_snapshot.tone` | neutral, friendly, serious, motivational, strict |
-| Intensity | `personality_snapshot.intensity` | 0.0 - 1.0 |
-| Mood | Calculated per request | frustrated → tired → normal → hopeful → happy → proud |
+| Tone | `personality_snapshot.tone` | neutral, friendly, serious, motivational, strict, toxic |
+| Mood | `personality_snapshot.mood` | frustrated → tired → normal → hopeful → happy → proud |
+
+Tone and mood are injected into the Gus system prompt (`gus_system.txt`) via template variables `{tone}` and `{mood}`. Gemini receives the full personality definition and generates responses in character.
 
 ### 3-Circle Scope
 
 | Circle | Topics | AI Action |
 |--------|--------|-----------|
-| 1 — Core | TallyFinance, Gus, transactions, budgets, goals | Always respond (tool_call) |
-| 2 — Related | Personal finance, Chilean economy, savings tips | Respond with judgment (ask_app_info) |
-| 3 — Out of domain | Science, history, politics, programming | Redirect politely (direct_reply with humor) |
+| 1 — Core | TallyFinance, Gus, transactions, budgets, goals, categories, balance | Always execute function |
+| 2 — Related | Personal finance, Chilean economy, savings tips | Respond with judgment |
+| 3 — Out of domain | Science, history, politics, programming | Redirect politely (with humor in Gus's tone) |
 
 ## Database (Supabase)
 
@@ -265,7 +279,7 @@ curl -X POST http://localhost:3000/bot/test \
 |-------|---------|-------------|
 | `users` | User profiles | Backend (auth, onboarding, context) |
 | `user_prefs` | Preferences (notifications, unified_balance) | Backend (context, onboarding) |
-| `personality_snapshot` | Bot personality per user (tone, intensity, mood) | Backend (context, onboarding) |
+| `personality_snapshot` | Bot personality per user (tone, mood) | Backend (context, onboarding) |
 | `channel_accounts` | Platform links (user ↔ Telegram/WhatsApp) | Backend (bot, auth, linking) |
 | `channel_link_codes` | Temp link codes (10-min TTL) | Backend (linking flow) |
 | `transactions` | Financial records | Backend (tools, user API) |
@@ -292,15 +306,14 @@ curl -X POST http://localhost:3000/bot/test \
 
 | Key Pattern | TTL | Purpose | Service |
 |-------------|-----|---------|---------|
-| `ctx:{userId}` | 60s | User context cache | UserContextService |
+| `ctx:{userId}` | 60s | User context cache (6 parallel DB queries) | UserContextService |
 | `rl:{externalId}` | 60s | Rate limiting (30 msgs/min) | AsyncRateLimiter |
-| `lock:{userId}` | 5s | Concurrency lock | BotService |
-| `msg:{msgId}` | 120s→24h | Two-phase message dedup | BotService |
-| `tally:circuit:{service}` | — | Circuit breaker state | CircuitBreaker |
-| `conv:{userId}:summary` | 2-24h | Conversation recap | ConversationService |
-| `conv:{userId}:pending` | 10m | Slot-fill state | ConversationService |
-| `conv:{userId}:metrics` | 30d | Streak, week count | MetricsService |
-| `conv:{userId}:cooldowns` | 30d | Nudge cooldown timestamps | CooldownService |
+| `lock:{userId}` | 5s | Concurrency lock | BotV3Service |
+| `msg:{msgId}` | 120s→24h | Two-phase message dedup | BotV3Service |
+| `conv:v3:{userId}` | 4h | Gemini conversation history (Content[] format, FIFO 50 entries) | ConversationV3Service |
+| `conv:{userId}:metrics` | 30d | Streak days, week tx count | MetricsService |
+| `tokens:daily:{userId}` | 24h | Daily token usage counter | BotV3Service |
+| `tokens:monthly:{userId}` | 30d | Monthly token usage counter | BotV3Service |
 
 **Fallback:** Single instance → in-memory Map with warning. Multi instance → fail hard (503).
 
@@ -308,14 +321,12 @@ curl -X POST http://localhost:3000/bot/test \
 
 | Pattern | Location | Config |
 |---------|----------|--------|
-| **Rate Limiting** | `bot.controller.ts` | 30 msgs/60s per user (ZSET + 5min cleanup) |
-| **Circuit Breaker** | `orchestrator.client.ts` | 5 failures → OPEN (30s) → HALF_OPEN → CLOSED |
-| **Message Dedup** | `bot.service.ts` | Two-phase: "processing" (120s) → "done" (24h) |
-| **User Lock** | `bot.service.ts` | `lock:{userId}` 5s TTL, explicit drop if busy |
+| **Rate Limiting** | `bot.controller.ts` | 30 msgs/60s per user (ZSET + sliding window) |
+| **Message Dedup** | `bot-v3.service.ts` | Two-phase: "processing" (120s) → "done" (24h) |
+| **User Lock** | `bot-v3.service.ts` | `lock:{userId}` 5s TTL, explicit release |
 | **Context Cache** | `user-context.service.ts` | Redis 60s TTL, 6 parallel DB queries on miss |
-| **Cold Start** | `orchestrator.client.ts` | Detects 502, sends wake-up GET to `/health` |
-| **Stub Mode** | `orchestrator.client.ts` | Regex pattern matching when AI unavailable |
-| **OpenAI Retry** | `orchestrator.py` | MAX_RETRIES=1 (2 total attempts), 25s timeout |
+| **Token Limit** | `bot-v3.service.ts` | 2M tokens/day per user, checked before Gemini call |
+| **Function Loop Cap** | `gemini.client.ts` | Max 10 function-calling iterations per turn |
 
 ## Authentication
 
@@ -323,7 +334,7 @@ curl -X POST http://localhost:3000/bot/test \
 |--------|---------|
 | Email/password | Signup with argon2 hashing, signin with JWT cookies |
 | Google OAuth | Only supported provider (`@IsIn(['google'])`) |
-| JWT Cookies | `access_token` (15min, HttpOnly, Secure, SameSite=None) + `refresh_token` (7d) |
+| JWT Cookies | `access_token` (1h, HttpOnly, Secure, SameSite=Lax) + `refresh_token` (7d) |
 | Frontend token | Module-level `currentAccessToken` in apiClient.js, auto 401 → refresh retry |
 
 ## Channel Linking Flow
@@ -364,8 +375,8 @@ APP_BASE_URL=http://localhost:3000
 SUPABASE_URL=https://xxx.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=eyJ...
 
-# AI Service
-AI_SERVICE_URL=http://localhost:8000
+# Gemini
+GEMINI_API_KEY=AIza...
 
 # Redis
 REDIS_URL=redis://localhost:6379
@@ -383,18 +394,7 @@ CORS_ORIGINS=http://localhost:5173
 LINK_ACCOUNT_URL=http://localhost:5173/connect/
 
 # Feature Flags
-DISABLE_AI=0               # 1 = maintenance mode
 MULTI_INSTANCE=false        # true = fail hard when Redis unavailable
-```
-
-### AI Service (.env)
-```bash
-OPENAI_API_KEY=sk-proj-xxx
-OPENAI_MODEL=gpt-4o-mini
-OPENAI_TIMEOUT=25.0
-OPENAI_TEMPERATURE_PHASE_A=0.3
-OPENAI_TEMPERATURE_PHASE_B=0.7
-MAX_RETRIES=1              # OpenAI retry count
 ```
 
 ### Frontend (.env)
@@ -402,56 +402,69 @@ MAX_RETRIES=1              # OpenAI retry count
 VITE_API_URL=http://localhost:3000   # Backend URL
 ```
 
-## Adding a New Tool Handler
+## Adding a New Function (V3)
 
-1. Create handler in `tally-combined/backend-API_TallyFinance/src/bot/tools/handlers/`:
+1. **Create the handler** in `src/bot/v3/functions/my-function.fn.ts`:
 
 ```typescript
-export class MyToolHandler implements ToolHandler {
-  readonly name = 'my_tool';
-  readonly schema: ToolSchema = {
-    name: 'my_tool',
-    description: 'Description for AI (in Spanish)',
-    parameters: { type: 'object', properties: {}, required: [] },
-  };
-  readonly requiresContext = true; // or false
+import { SupabaseClient } from '@supabase/supabase-js';
 
-  async execute(userId: string, msg: DomainMessage, args: Record<string, unknown>): Promise<ActionResult> {
-    return { ok: true, action: 'my_tool', data: {} };
-  }
+export async function myFunction(
+  supabase: SupabaseClient,
+  userId: string,
+  args: { /* typed args */ },
+): Promise<Record<string, any>> {
+  // Execute DB operations
+  return { ok: true, data: { /* result */ } };
 }
 ```
 
-2. Register in `ToolRegistry` constructor (`tool-registry.ts`)
-3. Add corresponding tool schema in AI service (`tool_schemas.py`)
-4. Add stub response in `OrchestratorClient.stubPhaseB()` for offline fallback
-5. Add guardrails validation in `guardrails.service.ts` if the tool has args
-6. Add summary template in AI service `_summarize_action()` (`orchestrator.py`)
+2. **Add the declaration** in `function-declarations.ts` — add to the `functionDeclarations` array:
+
+```typescript
+{
+  name: 'my_function',
+  description: 'Description in Spanish for Gemini',
+  parameters: {
+    type: 'object' as any,
+    properties: {
+      // Parameter definitions with S() helper
+    },
+    required: ['required_param'],
+  },
+},
+```
+
+3. **Register in the router** in `function-router.ts` — add a case to the switch:
+
+```typescript
+case 'my_function':
+  return myFunction(supabase, userId, args as any);
+```
+
+4. **Add confirmation card** (if applicable) in `bot-v3.service.ts` `buildCardForFunction()` and `response-builder.service.ts` — build the visual card the user sees.
+
+5. **Add to MUTATION_FNS** (if applicable) in `bot-v3.service.ts` — if the function mutates data, add it to trigger cache invalidation.
 
 ## Error Codes
-
-### AI Service (returned to backend)
-| Code | HTTP | When |
-|------|------|------|
-| `INVALID_PHASE` | 400 | Phase not "A" or "B" |
-| `MISSING_USER_TEXT` | 400 | Phase A without user_text |
-| `MISSING_ACTION_RESULT` | 400 | Phase B without action_result |
-| `LLM_ERROR` | 500 | OpenAI API error |
-| `LLM_TIMEOUT` | 503 | OpenAI timeout (>25s) |
 
 ### Backend (internal)
 | Code | When |
 |------|------|
-| `INVALID_RESPONSE` | AI response failed validation/parsing |
-| `COLD_START` | AI service returning 502 (Render free tier waking up) |
+| `INVALID_AMOUNT` | Amount <= 0 or >= 100,000,000 |
+| `NOT_FOUND` | Transaction/category not found |
+| `AMBIGUOUS` | Multiple transactions match hints |
+| `UNKNOWN_FUNCTION` | Gemini called a function not in the router |
+| `DB_ERROR` | Supabase query failed |
 
 ### User-Facing Messages (Spanish)
 | Error | Message |
 |-------|---------|
-| `LLM_TIMEOUT` | "El servicio esta tardando mas de lo normal. Por favor intenta de nuevo." |
-| `INVALID_RESPONSE` | "Recibi una respuesta inesperada. Podrias reformular tu mensaje?" |
-| `LLM_ERROR` | "Hubo un problema con el servicio de IA. Por favor intenta de nuevo." |
-| Default | "Hubo un problema procesando tu solicitud." |
+| Gemini failure | "Tuve un problema procesando tu mensaje. Intenta de nuevo." |
+| Token limit | "Has alcanzado tu limite diario de mensajes. Vuelve manana o mejora tu plan." |
+| Lock busy | "Dame un momento, estoy procesando tu mensaje anterior." |
+| Dedup | "Procesando tu mensaje anterior..." |
+| Rate limit | "Demasiados mensajes. Espera un momento antes de enviar mas." |
 
 ## Detailed Documentation
 
@@ -459,6 +472,5 @@ export class MyToolHandler implements ToolHandler {
 |----------|-------|---------|
 | `docs/TALLYFINANCE_SYSTEM.md` | 1100+ | Complete system reference (architecture, flows, schemas, gaps, roadmap) |
 | `docs/TALLYFINANCE_ENDPOINTS.md` | — | Consolidated endpoint testing guide |
-| `tally-combined/backend-API_TallyFinance/CLAUDE.md` | 835 | Backend: file structure, all endpoints, bot loop, tool handlers, Redis, auth, admin |
-| `tally-combined/ai-service_TallyFinane/CLAUDE.md` | 507 | AI service: orchestrator, schemas, prompts, mood calc, nudge detection, debug logger |
+| `backend/CLAUDE.md` | — | Backend: file structure, V3 pipeline, function handlers, Redis, auth, admin |
 | `frontend_TallyFinance/CLAUDE.md` | 649 | Frontend: file structure, routes, hooks, API client, design system, user flows |
