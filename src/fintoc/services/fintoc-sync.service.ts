@@ -173,9 +173,11 @@ export class FintocSyncService {
         },
       });
 
-      // Fire-and-forget: push a debug summary to the user's Telegram if
-      // anything new was imported. Never blocks the sync or throws.
-      if (userId && totalInserted > 0) {
+      // Fire-and-forget: push a debug/heartbeat summary to the user's
+      // Telegram on EVERY sync — including "nothing new" webhooks. This
+      // doubles as a liveness signal while the proactive pipeline matures.
+      // Never blocks the sync or throws.
+      if (userId) {
         void this.syncDebug
           .fire({
             linkId,
