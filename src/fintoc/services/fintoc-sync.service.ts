@@ -4,7 +4,10 @@ import { FintocApiClient } from './fintoc-api.client';
 import { FintocCryptoService } from './fintoc-crypto.service';
 import { fromFintocMinorUnits } from './fintoc-money';
 import { FintocMovement } from '../contracts/fintoc-api.types';
-import { normalizeTransactionFields } from '../../bot/v3/functions/shared/transaction-normalizer';
+import { MerchantResolverService } from '../../merchants/services/merchant-resolver.service';
+import { MerchantPreferencesService } from '../../merchants/services/merchant-preferences.service';
+import { ResolverOutput } from '../../merchants/contracts/resolver.types';
+import { pickCategoryEmoji } from '../../bot/v3/functions/emoji-mapper';
 
 interface FintocAccountRow {
   id: string;
@@ -20,13 +23,27 @@ interface SyncResult {
   transactionsInserted: number;
 }
 
+// Concurrent merchant resolutions per batch. Keeps tail latency bounded when
+// Layer 1d (LLM) is hit while not hammering Gemini.
+const RESOLVE_BATCH_SIZE = 10;
+
 /**
  * Sincroniza movimientos desde Fintoc hacia `transactions`.
- * Llamada por el webhook handler cuando llega `account.refresh_intent.succeeded`.
+ * Llamada por el webhook handler (account.refresh_intent.succeeded) y
+ * también por el initial sync post-exchange en FintocLinkService.
  *
- * - Idempotencia por `transactions.external_id` UNIQUE
- * - Respeta signo del amount (negativo = gasto, positivo = ingreso)
- * - Marca `source='bank_api'` y `auto_categorized=true` cuando hay match de merchant
+ * Garantías:
+ *   - Idempotencia total: `transactions.external_id` UNIQUE + upsert ignoreDuplicates.
+ *   - Filtra movements marcados `duplicated` por Fintoc.
+ *   - Signo: amount < 0 → expense, amount >= 0 → income. Almacena amount absoluto.
+ *   - Status: `reversed` → voided, `pending` → pending, else posted.
+ *   - Balance autoritativo desde Fintoc (no derivado de sumar movements).
+ *   - Cursor por account: último `posted_at` con source='bank_api'.
+ *   - Merchant resolver: 4-layer cascade (catalog/trgm/embedding/llm).
+ *   - Categoría: user override per-merchant → default del merchant → auto-create.
+ *   - Transfers: `name='Transferencia'`, categoría auto "Transferencia".
+ *   - Auto_categorized: true si alguna categoría se pudo asignar en el insert.
+ *   - Resolver errors: nunca explotan el sync; el row se inserta con merchant_id=null.
  */
 @Injectable()
 export class FintocSyncService {
@@ -35,11 +52,13 @@ export class FintocSyncService {
   constructor(
     private readonly api: FintocApiClient,
     private readonly crypto: FintocCryptoService,
+    private readonly merchantResolver: MerchantResolverService,
+    private readonly merchantPrefs: MerchantPreferencesService,
     @Inject('SUPABASE') private readonly supabase: SupabaseClient,
   ) {}
 
   /**
-   * Sincroniza todas las cuentas de un link (ej: tras refresh_intent.succeeded).
+   * Sincroniza todas las cuentas de un link.
    */
   async syncLink(linkId: string): Promise<SyncResult[]> {
     this.logger.log(`[fintoc] sync start link=${linkId}`);
@@ -149,20 +168,54 @@ export class FintocSyncService {
     return all;
   }
 
+  /**
+   * Resolves merchants + categories in parallel batches, builds rows, and
+   * upserts with onConflict on external_id.
+   */
   private async persistMovements(
     account: FintocAccountRow,
     movements: FintocMovement[],
   ): Promise<number> {
     if (movements.length === 0) return 0;
 
-    const rows = movements
-      .filter((m) => m.status !== 'duplicated')
-      .map((m) => this.movementToInsertRow(account, m));
+    const filtered = movements.filter((m) => m.status !== 'duplicated');
+    if (filtered.length === 0) return 0;
+
+    // Pre-load the user's categories once, cache by lowercase name for fast lookup.
+    const categoryCache = await this.loadUserCategoryCache(account.user_id);
+
+    const rows: Record<string, unknown>[] = [];
+
+    for (let i = 0; i < filtered.length; i += RESOLVE_BATCH_SIZE) {
+      const chunk = filtered.slice(i, i + RESOLVE_BATCH_SIZE);
+      const resolved = await Promise.all(
+        chunk.map((m) =>
+          this.safeResolve(m.description ?? '', m.amount < 0),
+        ),
+      );
+
+      for (let j = 0; j < chunk.length; j++) {
+        const movement = chunk[j];
+        const merchantResult = resolved[j];
+        const categoryId = await this.resolveCategoryId(
+          account.user_id,
+          merchantResult,
+          categoryCache,
+        );
+        rows.push(
+          this.movementToInsertRow(
+            account,
+            movement,
+            merchantResult,
+            categoryId,
+          ),
+        );
+      }
+    }
 
     if (rows.length === 0) return 0;
 
     // Idempotencia: `transactions.external_id` es UNIQUE (WHERE NOT NULL).
-    // ON CONFLICT DO NOTHING deja pasar los duplicados sin romper el batch.
     const { data, error } = await this.supabase
       .from('transactions')
       .upsert(rows, { onConflict: 'external_id', ignoreDuplicates: true })
@@ -174,19 +227,129 @@ export class FintocSyncService {
     return data?.length ?? 0;
   }
 
+  /**
+   * Wrapper around MerchantResolverService.resolve that never throws.
+   * Falls back to a minimal "none" result on unexpected failure.
+   */
+  private async safeResolve(
+    rawDescription: string,
+    isExpense: boolean,
+  ): Promise<ResolverOutput> {
+    try {
+      return await this.merchantResolver.resolve({ rawDescription });
+    } catch (err) {
+      this.logger.warn(
+        `[fintoc] resolver error raw="${rawDescription.slice(0, 60)}": ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return {
+        merchantId: null,
+        name: rawDescription.trim().slice(0, 40) || (isExpense ? 'Gasto' : 'Ingreso'),
+        logoUrl: null,
+        defaultCategory: null,
+        source: 'none',
+        latencyMs: 0,
+      };
+    }
+  }
+
+  /**
+   * Resolves the final category_id for a movement:
+   *   1. Per-user preference for this merchant (if any).
+   *   2. Merchant's default_category, looked up or created in user's categories.
+   *   3. null if no default available or creation fails.
+   */
+  private async resolveCategoryId(
+    userId: string,
+    resolved: ResolverOutput,
+    categoryCache: Map<string, string>,
+  ): Promise<string | null> {
+    // 1. User preference for this merchant (only meaningful when merchantId exists).
+    if (resolved.merchantId) {
+      const preferred = await this.merchantPrefs.getCategoryFor(
+        userId,
+        resolved.merchantId,
+      );
+      if (preferred) return preferred;
+    }
+
+    // 2. Merchant default, looked up or created in the user's categories.
+    if (resolved.defaultCategory) {
+      return this.ensureCategoryId(
+        userId,
+        resolved.defaultCategory,
+        categoryCache,
+      );
+    }
+
+    return null;
+  }
+
+  /**
+   * Loads the user's categories and returns a cache keyed by lowercased name.
+   */
+  private async loadUserCategoryCache(
+    userId: string,
+  ): Promise<Map<string, string>> {
+    const cache = new Map<string, string>();
+    const { data, error } = await this.supabase
+      .from('categories')
+      .select('id, name')
+      .eq('user_id', userId);
+
+    if (error) {
+      this.logger.warn(
+        `[fintoc] load categories failed user=${userId}: ${error.message}`,
+      );
+      return cache;
+    }
+
+    for (const row of data ?? []) {
+      cache.set(row.name.toLowerCase(), row.id);
+    }
+    return cache;
+  }
+
+  /**
+   * Looks up a category by (case-insensitive) name in the cache. If missing,
+   * inserts it with an auto-picked emoji and writes it back to the cache.
+   */
+  private async ensureCategoryId(
+    userId: string,
+    categoryName: string,
+    cache: Map<string, string>,
+  ): Promise<string | null> {
+    const key = categoryName.toLowerCase();
+    const cached = cache.get(key);
+    if (cached) return cached;
+
+    const icon = pickCategoryEmoji(categoryName);
+    const { data, error } = await this.supabase
+      .from('categories')
+      .insert({ user_id: userId, name: categoryName, icon })
+      .select('id')
+      .single();
+
+    if (error || !data) {
+      this.logger.warn(
+        `[fintoc] auto-create category "${categoryName}" failed user=${userId}: ${error?.message}`,
+      );
+      return null;
+    }
+    cache.set(key, data.id);
+    return data.id;
+  }
+
   private movementToInsertRow(
     account: FintocAccountRow,
     movement: FintocMovement,
+    resolved: ResolverOutput,
+    categoryId: string | null,
   ): Record<string, unknown> {
     const signed = fromFintocMinorUnits(movement.amount, movement.currency);
     const amountInUnits = Math.abs(signed);
     const isExpense = movement.amount < 0;
-
-    const normalized = normalizeTransactionFields({
-      description: movement.description,
-      userCategory: null,
-      fallbackName: isExpense ? 'Gasto' : 'Ingreso',
-    });
 
     const status =
       movement.status === 'reversed'
@@ -207,11 +370,16 @@ export class FintocSyncService {
       status,
       posted_at: movement.post_date,
       transaction_at: movement.transaction_date ?? null,
-      name: normalized.name,
+      name: resolved.name || (isExpense ? 'Gasto' : 'Ingreso'),
       description: null,
-      raw_description: normalized.raw_description,
-      merchant_name: normalized.merchant_name,
-      auto_categorized: normalized.auto_categorized,
+      raw_description: movement.description ?? null,
+      merchant_id: resolved.merchantId,
+      // merchant_name se mantiene como snapshot durante la transición.
+      // Una migración futura lo dropea una vez que todos los reads usen JOIN.
+      merchant_name: resolved.name,
+      resolver_source: resolved.source,
+      category_id: categoryId,
+      auto_categorized: !!categoryId,
       metadata: {
         fintoc: {
           type: movement.type,

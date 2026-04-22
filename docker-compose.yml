@@ -1,0 +1,57 @@
+# ============================================
+# TallyFinance - Docker Compose (Local Dev)
+# ============================================
+# Uso: docker-compose up --build
+
+services:
+  # ============================================
+  # Redis - Puerto 6379
+  # ============================================
+  redis:
+    image: redis:7-alpine
+    container_name: tally-redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    networks:
+      - tally-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ============================================
+  # Backend API (NestJS + Gemini) - Puerto 3000
+  # ============================================
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tally-backend
+    ports:
+      - "3000:3000"
+    env_file:
+      - ./.env
+    environment:
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - tally-network
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:3000/ || exit 0"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+
+networks:
+  tally-network:
+    driver: bridge
