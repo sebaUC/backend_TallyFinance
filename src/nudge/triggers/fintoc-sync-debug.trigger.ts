@@ -29,6 +29,11 @@ export class FintocSyncDebugTrigger {
 
   /**
    * Entry point. Never throws — caller treats as fire-and-forget.
+   *
+   * Runs on EVERY webhook, including "nothing new" refreshes. Emits a
+   * short heartbeat message in that case so we can visually confirm the
+   * webhook → sync → Telegram pipeline is healthy. Will graduate to
+   * movements-only or gated-by-preference once PLAN_GUS_PROACTIVO F1 ships.
    */
   async fire(params: {
     linkId: string;
@@ -37,11 +42,8 @@ export class FintocSyncDebugTrigger {
     syncStartedAt: Date;
   }): Promise<void> {
     try {
-      if (params.totalInserted === 0) return; // nothing new to say
-
       const summary = await this.computeSummary(params);
       const text = buildSyncSummary(summary);
-      if (!text) return;
 
       await this.sender.send({
         userId: params.userId,

@@ -38,11 +38,15 @@ export interface SyncSummaryInput {
 }
 
 /**
- * Returns an HTML-formatted Telegram message, or null when there's nothing
- * worth reporting (0 new transactions).
+ * Returns an HTML-formatted Telegram message. Always returns something —
+ * the nudge doubles as a heartbeat so even "nothing new" gets a short
+ * confirmation message. Caller can still suppress via other gates
+ * (disabled_by_flag, rate limit, etc.).
  */
-export function buildSyncSummary(input: SyncSummaryInput): string | null {
-  if (input.totalInserted === 0) return null;
+export function buildSyncSummary(input: SyncSummaryInput): string {
+  if (input.totalInserted === 0) {
+    return buildHeartbeatMessage(input);
+  }
 
   const lines: string[] = [];
 
@@ -100,6 +104,24 @@ export function buildSyncSummary(input: SyncSummaryInput): string | null {
 }
 
 // ── internals ─────────────────────────────────────────────────────
+
+/**
+ * Short message emitted on every webhook, even when nothing changed.
+ * Acts as a liveness signal — user knows the webhook reached our server
+ * and the sync completed successfully.
+ */
+function buildHeartbeatMessage(input: SyncSummaryInput): string {
+  const bank = input.institutionName
+    ? ` de ${escape(input.institutionName)}`
+    : '';
+  return [
+    `💳 <b>Todo al día${bank}</b>`,
+    '',
+    'Sin movimientos nuevos en este refresh.',
+    '',
+    '<i>(Webhook conectado, todo en orden)</i>',
+  ].join('\n');
+}
 
 function buildResolverFooter(
   breakdown: Record<string, number>,
