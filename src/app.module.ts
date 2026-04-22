@@ -11,6 +11,7 @@ import { BotModule } from './bot/bot.module';
 import { AdminModule } from './admin/admin.module';
 import { CategoriesModule } from './categories/categories.module';
 import { FintocModule } from './fintoc/fintoc.module';
+import { MerchantsModule } from './merchants/merchants.module';
 
 @Module({
   imports: [
@@ -23,6 +24,7 @@ import { FintocModule } from './fintoc/fintoc.module';
     AdminModule,
     CategoriesModule,
     FintocModule,
+    MerchantsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

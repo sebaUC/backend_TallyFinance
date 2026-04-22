@@ -10,6 +10,7 @@ import { FintocAuditService } from './services/fintoc-audit.service';
 import { FintocWebhookGuard } from './guards/fintoc-webhook.guard';
 import { AdminGuard } from '../admin/guards/admin.guard';
 import { MfaRequiredGuard } from '../auth/middleware/mfa.guard';
+import { MerchantsModule } from '../merchants/merchants.module';
 
 /**
  * Módulo Fintoc — integración de cuentas bancarias chilenas via Fintoc.
@@ -22,6 +23,7 @@ import { MfaRequiredGuard } from '../auth/middleware/mfa.guard';
  * Idempotencia: webhook dedup vía Redis SETNX, `transactions.external_id` UNIQUE.
  */
 @Module({
+  imports: [MerchantsModule],
   controllers: [FintocController, FintocWebhookController],
   providers: [
     FintocApiClient,

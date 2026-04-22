@@ -7,8 +7,35 @@ export type Json =
   | Json[]
 
 export type Database = {
+  // Allows to automatically instantiate createClient with right options
+  // instead of createClient<Database, { PostgrestVersion: 'XX' }>(URL, KEY)
   __InternalSupabase: {
     PostgrestVersion: "13.0.5"
+  }
+  graphql_public: {
+    Tables: {
+      [_ in never]: never
+    }
+    Views: {
+      [_ in never]: never
+    }
+    Functions: {
+      graphql: {
+        Args: {
+          extensions?: Json
+          operationName?: string
+          query?: string
+          variables?: Json
+        }
+        Returns: Json
+      }
+    }
+    Enums: {
+      [_ in never]: never
+    }
+    CompositeTypes: {
+      [_ in never]: never
+    }
   }
   public: {
     Tables: {
@@ -481,6 +508,42 @@ export type Database = {
           },
         ]
       }
+      merchants_global: {
+        Row: {
+          aliases: string[]
+          created_at: string
+          default_category: string | null
+          embedding: string | null
+          id: string
+          logo_url: string | null
+          name: string
+          updated_at: string
+          verified: boolean
+        }
+        Insert: {
+          aliases?: string[]
+          created_at?: string
+          default_category?: string | null
+          embedding?: string | null
+          id?: string
+          logo_url?: string | null
+          name: string
+          updated_at?: string
+          verified?: boolean
+        }
+        Update: {
+          aliases?: string[]
+          created_at?: string
+          default_category?: string | null
+          embedding?: string | null
+          id?: string
+          logo_url?: string | null
+          name?: string
+          updated_at?: string
+          verified?: boolean
+        }
+        Relationships: []
+      }
       payment_method: {
         Row: {
           account_id: string | null
@@ -636,6 +699,7 @@ export type Database = {
           name: string | null
           posted_at: string
           raw_description: string | null
+          resolver_source: string | null
           source: Database["public"]["Enums"]["tx_source_t"]
           status: Database["public"]["Enums"]["tx_status_t"]
           transaction_at: string | null
@@ -662,6 +726,7 @@ export type Database = {
           name?: string | null
           posted_at: string
           raw_description?: string | null
+          resolver_source?: string | null
           source?: Database["public"]["Enums"]["tx_source_t"]
           status?: Database["public"]["Enums"]["tx_status_t"]
           transaction_at?: string | null
@@ -688,6 +753,7 @@ export type Database = {
           name?: string | null
           posted_at?: string
           raw_description?: string | null
+          resolver_source?: string | null
           source?: Database["public"]["Enums"]["tx_source_t"]
           status?: Database["public"]["Enums"]["tx_status_t"]
           transaction_at?: string | null
@@ -721,6 +787,13 @@ export type Database = {
             columns: ["income_expectation_id"]
             isOneToOne: false
             referencedRelation: "income_expectations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "transactions_merchant_id_fkey"
+            columns: ["merchant_id"]
+            isOneToOne: false
+            referencedRelation: "merchants_global"
             referencedColumns: ["id"]
           },
           {
@@ -760,6 +833,52 @@ export type Database = {
         Relationships: [
           {
             foreignKeyName: "user_emotional_log_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "users"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      user_merchant_preferences: {
+        Row: {
+          category_id: string
+          last_used_at: string
+          merchant_id: string
+          times_used: number
+          user_id: string
+        }
+        Insert: {
+          category_id: string
+          last_used_at?: string
+          merchant_id: string
+          times_used?: number
+          user_id: string
+        }
+        Update: {
+          category_id?: string
+          last_used_at?: string
+          merchant_id?: string
+          times_used?: number
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "user_merchant_preferences_category_id_fkey"
+            columns: ["category_id"]
+            isOneToOne: false
+            referencedRelation: "categories"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "user_merchant_preferences_merchant_id_fkey"
+            columns: ["merchant_id"]
+            isOneToOne: false
+            referencedRelation: "merchants_global"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "user_merchant_preferences_user_id_fkey"
             columns: ["user_id"]
             isOneToOne: false
             referencedRelation: "users"
@@ -1023,6 +1142,9 @@ export type CompositeTypes<
     : never
 
 export const Constants = {
+  graphql_public: {
+    Enums: {},
+  },
   public: {
     Enums: {
       app_pkg_enum: ["basic", "intermedio", "avanzado"],
