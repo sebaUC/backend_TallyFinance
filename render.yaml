@@ -14,6 +14,10 @@ services:
         value: production
       - key: PORT
         value: "3000"
+      # Logs y Date.toString() en hora Chile. NO afecta timestamps persistidos
+      # (toISOString siempre UTC) ni helpers que pasan timeZone explícito.
+      - key: TZ
+        value: America/Santiago
       - key: GEMINI_API_KEY
         sync: false
       - key: REDIS_URL
