@@ -128,6 +128,20 @@ export class FintocWebhookService {
   ): Promise<void> {
     const linkId = await this.resolveLocalLinkId(event);
     if (!linkId) return;
+
+    // Per-link lock: Fintoc fires multiple webhooks per refresh (distinct
+    // event IDs that bypass the per-event dedup). Without this, we run
+    // syncLink in parallel for the same link → duplicate API calls,
+    // duplicate nudge messages, race on transactions UPSERT.
+    // 30s TTL covers a typical sync (1-3s) with margin.
+    const lockKey = `fintoc:sync:${linkId}`;
+    const gotLock = await this.redis.acquireLock(lockKey, 30_000);
+    if (!gotLock) {
+      this.logger.log(
+        `[fintoc] sync skipped link=${linkId} event=${event.id} — already in progress`,
+      );
+      return;
+    }
     try {
       await this.sync.syncLink(linkId);
     } catch (err) {
@@ -136,6 +150,8 @@ export class FintocWebhookService {
           err instanceof Error ? err.message : String(err)
         }`,
       );
+    } finally {
+      await this.redis.releaseLock(lockKey);
     }
   }
 

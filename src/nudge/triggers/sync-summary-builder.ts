@@ -10,6 +10,7 @@
 import {
   formatChileTime,
   formatChileDateTime,
+  effectiveMovementTimestamp,
 } from '../../bot/v3/functions/shared/chile-time';
 
 export interface SyncSummaryInput {
@@ -23,12 +24,15 @@ export interface SyncSummaryInput {
     amount: number;
     icon: string | null;
   }>;
-  /** Cada movement nuevo, con timestamp en ISO (Fintoc post_date / transaction_date). */
+  /** Cada movement nuevo. AMBOS timestamps separados para distinguir hora real
+   *  de la compra (transaction_at) vs hora de posteo bancario (posted_at).
+   *  Para Banco BICE / BancoEstado y otros, posted_at puede ser días en el futuro. */
   newMovements: Array<{
     merchantName: string;
     amount: number;
     type: 'expense' | 'income';
-    postedAt: string | null;
+    transactionAt: string | null; // hora real de la compra (puede ser null)
+    postedAt: string | null;      // hora del posteo bancario (puede ser futuro)
     icon: string | null;
     resolverSource: string | null;
     rawDescription: string | null;
@@ -49,7 +53,9 @@ export interface SyncSummaryInput {
     merchantName: string;
     amount: number;
     type: 'expense' | 'income';
+    transactionAt: string | null;
     postedAt: string | null;
+    rawDescription: string | null;
   } | null;
   /** Cuándo terminó el sync — se imprime en el header. */
   syncCompletedAt: Date;
@@ -109,14 +115,20 @@ export function buildSyncSummary(input: SyncSummaryInput): string {
     lines.push('');
     lines.push('🟢 Pipeline OK — webhook recibido, sync ejecutado, cero movs nuevos.');
     if (input.lastSeenTx) {
-      const t = formatChileDateTime(input.lastSeenTx.postedAt);
+      const ts = formatMovementTimestamp(
+        input.lastSeenTx.transactionAt,
+        input.lastSeenTx.postedAt,
+        input.lastSeenTx.rawDescription ?? null,
+        true, // include date
+      );
       const sign = input.lastSeenTx.type === 'income' ? '+' : '−';
       lines.push('');
       lines.push(
         `<b>Último mov visto:</b> ${escape(input.lastSeenTx.merchantName)} ${sign}${fmt(
           input.lastSeenTx.amount,
-        )} · ${t}`,
+        )}`,
       );
+      lines.push(`   ${ts}`);
     }
   }
 
@@ -157,13 +169,14 @@ function formatMovementDebug(m: {
   merchantName: string;
   amount: number;
   type: 'expense' | 'income';
+  transactionAt: string | null;
   postedAt: string | null;
   icon: string | null;
   resolverSource: string | null;
   rawDescription: string | null;
   categoryName: string | null;
 }): string {
-  const time = formatChileTime(m.postedAt);
+  const ts = formatMovementTimestamp(m.transactionAt, m.postedAt, m.rawDescription, false);
   const sign = m.type === 'income' ? '+' : '−';
   const amount = `${sign}${fmt(m.amount)}`;
   const merchantIcon = m.icon ? `${m.icon} ` : m.type === 'income' ? '➕ ' : '🧾 ';
@@ -175,12 +188,47 @@ function formatMovementDebug(m: {
 
   return [
     '',
-    `${merchantIcon}<b>${time}</b> · ${amount}`,
+    `${merchantIcon}<b>${amount}</b> · ${ts}`,
     `   📥 raw: ${raw}`,
     `   🔍 resolver: ${resolver}`,
     `   🏪 comercio: <b>${escape(m.merchantName)}</b>`,
     `   🏷️ categoría: ${cat}`,
   ].join('\n');
+}
+
+/**
+ * Formatea el timestamp de un movement con honestidad sobre qué fuente usamos.
+ * Delega a `effectiveMovementTimestamp` que prueba en orden:
+ *   1. transaction_at (si no es futuro)
+ *   2. hora extraída del raw_description (BICE pattern)
+ *   3. posted_at (con flag isFuturePost)
+ *
+ * `withDate=true` incluye DD/MM antes de HH:MM (para heartbeat); por defecto
+ * solo HH:MM (para detalle por movement).
+ */
+function formatMovementTimestamp(
+  transactionAt: string | null,
+  postedAt: string | null,
+  rawDescription: string | null,
+  withDate: boolean,
+): string {
+  const fmt = withDate ? formatChileDateTime : formatChileTime;
+  const eff = effectiveMovementTimestamp(transactionAt, postedAt, rawDescription);
+  if (!eff.iso) return '<i>(sin fecha)</i>';
+
+  const time = `<b>${fmt(eff.iso)}</b>`;
+  switch (eff.source) {
+    case 'transaction_at':
+      return `${time} <i>(real)</i>`;
+    case 'raw_extracted':
+      return `${time} <i>(real, extraída del banco)</i>`;
+    case 'posted_at':
+      return eff.isFuturePost
+        ? `${time} ⚠️ <i>(banco postea con fecha futura)</i>`
+        : `${time} <i>(post bancario)</i>`;
+    default:
+      return time;
+  }
 }
 
 function labelResolver(source: string | null): string {
