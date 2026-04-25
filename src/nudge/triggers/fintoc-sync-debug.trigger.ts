@@ -194,7 +194,8 @@ export class FintocSyncDebugTrigger {
         merchantName,
         amount,
         type: row.type === 'income' ? 'income' : 'expense',
-        postedAt: row.transaction_at ?? row.posted_at,
+        transactionAt: row.transaction_at,
+        postedAt: row.posted_at,
         icon: cat.icon,
         resolverSource: row.resolver_source,
         rawDescription: row.raw_description,
@@ -280,7 +281,8 @@ export class FintocSyncDebugTrigger {
       merchantName: (row.merchant_name || row.name || 'Sin comercio').trim(),
       amount: Number(row.amount),
       type: row.type === 'income' ? 'income' : 'expense',
-      postedAt: row.transaction_at ?? row.posted_at,
+      transactionAt: row.transaction_at,
+      postedAt: row.posted_at,
     };
   }
 

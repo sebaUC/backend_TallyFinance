@@ -23,12 +23,15 @@ export interface SyncSummaryInput {
     amount: number;
     icon: string | null;
   }>;
-  /** Cada movement nuevo, con timestamp en ISO (Fintoc post_date / transaction_date). */
+  /** Cada movement nuevo. AMBOS timestamps separados para distinguir hora real
+   *  de la compra (transaction_at) vs hora de posteo bancario (posted_at).
+   *  Para Banco BICE / BancoEstado y otros, posted_at puede ser días en el futuro. */
   newMovements: Array<{
     merchantName: string;
     amount: number;
     type: 'expense' | 'income';
-    postedAt: string | null;
+    transactionAt: string | null; // hora real de la compra (puede ser null)
+    postedAt: string | null;      // hora del posteo bancario (puede ser futuro)
     icon: string | null;
     resolverSource: string | null;
     rawDescription: string | null;
@@ -49,6 +52,7 @@ export interface SyncSummaryInput {
     merchantName: string;
     amount: number;
     type: 'expense' | 'income';
+    transactionAt: string | null;
     postedAt: string | null;
   } | null;
   /** Cuándo terminó el sync — se imprime en el header. */
@@ -109,14 +113,19 @@ export function buildSyncSummary(input: SyncSummaryInput): string {
     lines.push('');
     lines.push('🟢 Pipeline OK — webhook recibido, sync ejecutado, cero movs nuevos.');
     if (input.lastSeenTx) {
-      const t = formatChileDateTime(input.lastSeenTx.postedAt);
+      const ts = formatMovementTimestamp(
+        input.lastSeenTx.transactionAt,
+        input.lastSeenTx.postedAt,
+        true, // include date
+      );
       const sign = input.lastSeenTx.type === 'income' ? '+' : '−';
       lines.push('');
       lines.push(
         `<b>Último mov visto:</b> ${escape(input.lastSeenTx.merchantName)} ${sign}${fmt(
           input.lastSeenTx.amount,
-        )} · ${t}`,
+        )}`,
       );
+      lines.push(`   ${ts}`);
     }
   }
 
@@ -157,13 +166,14 @@ function formatMovementDebug(m: {
   merchantName: string;
   amount: number;
   type: 'expense' | 'income';
+  transactionAt: string | null;
   postedAt: string | null;
   icon: string | null;
   resolverSource: string | null;
   rawDescription: string | null;
   categoryName: string | null;
 }): string {
-  const time = formatChileTime(m.postedAt);
+  const ts = formatMovementTimestamp(m.transactionAt, m.postedAt, false);
   const sign = m.type === 'income' ? '+' : '−';
   const amount = `${sign}${fmt(m.amount)}`;
   const merchantIcon = m.icon ? `${m.icon} ` : m.type === 'income' ? '➕ ' : '🧾 ';
@@ -175,12 +185,45 @@ function formatMovementDebug(m: {
 
   return [
     '',
-    `${merchantIcon}<b>${time}</b> · ${amount}`,
+    `${merchantIcon}<b>${amount}</b> · ${ts}`,
     `   📥 raw: ${raw}`,
     `   🔍 resolver: ${resolver}`,
     `   🏪 comercio: <b>${escape(m.merchantName)}</b>`,
     `   🏷️ categoría: ${cat}`,
   ].join('\n');
+}
+
+/**
+ * Formatea el timestamp de un movement con honestidad sobre qué fuente usamos.
+ *
+ * Reglas:
+ * - Si transaction_at existe → mostrar esa hora (es la real de la compra).
+ * - Si solo tenemos posted_at → mostrarlo con marca "(post bancario)" para
+ *   que el usuario sepa que es la hora del posteo, no de la compra.
+ * - Si posted_at es FUTURO respecto al sync (típico Banco BICE/Estado) →
+ *   warning visible "⚠️ banco postea con fecha futura".
+ *
+ * `withDate=true` incluye DD/MM antes de HH:MM (para heartbeat); por defecto
+ * solo HH:MM (para detalle por movement).
+ */
+function formatMovementTimestamp(
+  transactionAt: string | null,
+  postedAt: string | null,
+  withDate: boolean,
+): string {
+  const fmt = withDate ? formatChileDateTime : formatChileTime;
+
+  if (transactionAt) {
+    return `<b>${fmt(transactionAt)}</b> <i>(real)</i>`;
+  }
+  if (postedAt) {
+    const isFuture = new Date(postedAt).getTime() > Date.now();
+    if (isFuture) {
+      return `<b>${fmt(postedAt)}</b> ⚠️ <i>(banco postea con fecha futura)</i>`;
+    }
+    return `<b>${fmt(postedAt)}</b> <i>(post bancario)</i>`;
+  }
+  return '<i>(sin fecha)</i>';
 }
 
 function labelResolver(source: string | null): string {
