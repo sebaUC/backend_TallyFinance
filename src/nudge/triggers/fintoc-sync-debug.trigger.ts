@@ -1,7 +1,10 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { SupabaseClient } from '@supabase/supabase-js';
 
-import { startOfChileDayInUtc } from '../../bot/v3/functions/shared/chile-time';
+import {
+  startOfChileDayInUtc,
+  effectiveMovementTimestamp,
+} from '../../bot/v3/functions/shared/chile-time';
 import { NudgeSenderService } from '../nudge-sender.service';
 import {
   buildSyncSummary,
@@ -217,31 +220,62 @@ export class FintocSyncDebugTrigger {
     };
   }
 
-  /** Suma del día (Chile-time) para todas las cuentas del link. */
+  /**
+   * Suma del día (Chile-time) usando la fecha EFECTIVA del movement
+   * (transaction_at → hora extraída del raw → posted_at). Filtramos en JS
+   * porque PostgREST no soporta `coalesce` en filtros, y BICE pone la hora
+   * real solo en el raw_description.
+   *
+   * Traemos los últimos ~5 días por posted_at (suficientemente amplio para
+   * cubrir el desfase típico de settlement bancario), luego filtramos en
+   * memoria por effective >= startOfChileDay.
+   */
   private async fetchTodayTotals(
     userId: string,
     linkId: string,
   ): Promise<SyncSummaryInput['todayTotals']> {
     const startOfDayUtc = startOfChileDayInUtc();
+    // Ventana amplia para capturar tx con post diferido (BICE postea hasta D+3).
+    const windowStart = new Date(
+      Date.now() - 7 * 24 * 60 * 60 * 1000,
+    ).toISOString();
+
     const { data, error } = await this.supabase
       .from('transactions')
-      .select('amount, type')
+      .select('amount, type, raw_description, posted_at, transaction_at')
       .eq('user_id', userId)
       .eq('fintoc_link_id', linkId)
       .eq('source', 'bank_api')
-      .gte('posted_at', startOfDayUtc);
+      .gte('posted_at', windowStart);
 
     if (error) {
       this.log.warn(`[nudge:sync_debug] today totals failed: ${error.message}`);
       return { totalSpent: 0, expenseCount: 0, totalIncome: 0, incomeCount: 0 };
     }
+
+    const startMs = new Date(startOfDayUtc).getTime();
     let totalSpent = 0;
     let totalIncome = 0;
     let expenseCount = 0;
     let incomeCount = 0;
-    for (const row of (data ?? []) as Array<{ amount: number | string; type: string }>) {
+    for (const row of (data ?? []) as Array<{
+      amount: number | string;
+      type: string;
+      raw_description: string | null;
+      posted_at: string | null;
+      transaction_at: string | null;
+    }>) {
       const amount = Number(row.amount);
       if (!Number.isFinite(amount)) continue;
+
+      const eff = effectiveMovementTimestamp(
+        row.transaction_at,
+        row.posted_at,
+        row.raw_description,
+      );
+      if (!eff.iso) continue;
+      if (new Date(eff.iso).getTime() < startMs) continue;
+
       if (row.type === 'expense') {
         totalSpent += amount;
         expenseCount++;
@@ -253,18 +287,21 @@ export class FintocSyncDebugTrigger {
     return { totalSpent, expenseCount, totalIncome, incomeCount };
   }
 
-  /** Última transacción conocida del link, para mostrar en heartbeat. */
+  /** Última transacción conocida del link, para mostrar en heartbeat.
+   *  Ordenamos por created_at (cuándo la ingestamos) en vez de posted_at:
+   *  con post-dating bancario, posted_at puede ser futuro y dejar afuera
+   *  movs que ya nos llegaron. */
   private async fetchLastSeenTx(
     userId: string,
     linkId: string,
   ): Promise<SyncSummaryInput['lastSeenTx']> {
     const { data, error } = await this.supabase
       .from('transactions')
-      .select('amount, type, merchant_name, name, posted_at, transaction_at')
+      .select('amount, type, merchant_name, name, raw_description, posted_at, transaction_at')
       .eq('user_id', userId)
       .eq('fintoc_link_id', linkId)
       .eq('source', 'bank_api')
-      .order('posted_at', { ascending: false })
+      .order('created_at', { ascending: false })
       .limit(1)
       .maybeSingle();
 
@@ -274,6 +311,7 @@ export class FintocSyncDebugTrigger {
       type: string;
       merchant_name: string | null;
       name: string | null;
+      raw_description: string | null;
       posted_at: string | null;
       transaction_at: string | null;
     };
@@ -283,6 +321,7 @@ export class FintocSyncDebugTrigger {
       type: row.type === 'income' ? 'income' : 'expense',
       transactionAt: row.transaction_at,
       postedAt: row.posted_at,
+      rawDescription: row.raw_description,
     };
   }
 

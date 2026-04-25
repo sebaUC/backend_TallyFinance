@@ -28,18 +28,46 @@ function labelResolver(source) {
     default: return `<b>${escape(source)}</b>`;
   }
 }
-function formatMovementTimestamp(transactionAt, postedAt, withDate) {
+function chileOffsetHoursFor(ymd) {
+  const probe = new Date(`${ymd}T12:00:00Z`);
+  const parts = probe.toLocaleString('en-US', { timeZone: 'America/Santiago', timeZoneName: 'shortOffset' });
+  const m = parts.match(/GMT([+-]\d+)/);
+  return m ? parseInt(m[1], 10) : -4;
+}
+function extractFromRaw(raw) {
+  if (!raw) return null;
+  const m = raw.match(/el\s+(\d{2})\/(\d{2})\/(\d{4})\s+a\s+las\s+(\d{1,2}):(\d{2})(?::(\d{2}))?/i);
+  if (!m) return null;
+  const [, dd, mm, yyyy, hh, mi, ss] = m;
+  const off = chileOffsetHoursFor(`${yyyy}-${mm}-${dd}`);
+  const sign = off < 0 ? '-' : '+';
+  const oh = String(Math.abs(off)).padStart(2, '0');
+  return new Date(`${yyyy}-${mm}-${dd}T${hh.padStart(2,'0')}:${mi}:${ss ?? '00'}${sign}${oh}:00`).toISOString();
+}
+function effective(transactionAt, postedAt, raw) {
+  const now = Date.now();
+  if (transactionAt && new Date(transactionAt).getTime() <= now) return { iso: transactionAt, source: 'transaction_at', isFuture: false };
+  const fr = extractFromRaw(raw);
+  if (fr) return { iso: fr, source: 'raw_extracted', isFuture: false };
+  if (postedAt) return { iso: postedAt, source: 'posted_at', isFuture: new Date(postedAt).getTime() > now };
+  return { iso: null, source: 'none', isFuture: false };
+}
+function formatMovementTimestamp(transactionAt, postedAt, raw, withDate) {
   const f = withDate ? formatChileDateTime : formatChileTime;
-  if (transactionAt) return `<b>${f(transactionAt)}</b> <i>(real)</i>`;
-  if (postedAt) {
-    const isFuture = new Date(postedAt).getTime() > Date.now();
-    if (isFuture) return `<b>${f(postedAt)}</b> ⚠️ <i>(banco postea con fecha futura)</i>`;
-    return `<b>${f(postedAt)}</b> <i>(post bancario)</i>`;
+  const eff = effective(transactionAt, postedAt, raw);
+  if (!eff.iso) return '<i>(sin fecha)</i>';
+  const time = `<b>${f(eff.iso)}</b>`;
+  switch (eff.source) {
+    case 'transaction_at': return `${time} <i>(real)</i>`;
+    case 'raw_extracted': return `${time} <i>(real, extraída del banco)</i>`;
+    case 'posted_at': return eff.isFuture
+      ? `${time} ⚠️ <i>(banco postea con fecha futura)</i>`
+      : `${time} <i>(post bancario)</i>`;
+    default: return time;
   }
-  return '<i>(sin fecha)</i>';
 }
 function formatMovementDebug(m) {
-  const ts = formatMovementTimestamp(m.transactionAt, m.postedAt, false);
+  const ts = formatMovementTimestamp(m.transactionAt, m.postedAt, m.rawDescription, false);
   const sign = m.type === 'income' ? '+' : '−';
   const amount = `${sign}${fmt(m.amount)}`;
   const merchantIcon = m.icon ? `${m.icon} ` : (m.type === 'income' ? '➕ ' : '🧾 ');
@@ -100,7 +128,7 @@ function buildSyncSummary(input) {
     lines.push('');
     lines.push('🟢 Pipeline OK — webhook recibido, sync ejecutado, cero movs nuevos.');
     if (input.lastSeenTx) {
-      const ts = formatMovementTimestamp(input.lastSeenTx.transactionAt, input.lastSeenTx.postedAt, true);
+      const ts = formatMovementTimestamp(input.lastSeenTx.transactionAt, input.lastSeenTx.postedAt, input.lastSeenTx.rawDescription, true);
       const sign = input.lastSeenTx.type === 'income' ? '+' : '−';
       lines.push('');
       lines.push(`<b>Último mov visto:</b> ${escape(input.lastSeenTx.merchantName)} ${sign}${fmt(input.lastSeenTx.amount)}`);
@@ -143,8 +171,8 @@ function dtFuture(daysAhead, hh, mm) { // d días en el futuro a HH:MM Chile
   return new Date(`${ymd}T${String(hh).padStart(2,'0')}:${String(mm).padStart(2,'0')}:00-04:00`).toISOString();
 }
 
-// ── CASO BICE — exactamente lo que el usuario reportó (BUG REAL) ──
-box('CASO BICE — heartbeat con post futuro (bug del usuario)', buildSyncSummary({
+// ── CASO BICE-1 — heartbeat con BICE genérico (post futuro, igual que el bug) ──
+box('CASO BICE-1 — heartbeat con BICE genérico (sin hora en raw)', buildSyncSummary({
   totalInserted: 0,
   totalSpent: 0, expenseCount: 0, totalIncome: 0, incomeCount: 0,
   topMerchants: [], newMovements: [], newMerchantsDiscovered: [],
@@ -155,9 +183,34 @@ box('CASO BICE — heartbeat con post futuro (bug del usuario)', buildSyncSummar
     merchantName: 'Cargo Por Compra En Comercio Nac.',
     amount: 3850,
     type: 'expense',
-    transactionAt: null, // BICE no manda transaction_date para este tipo de cargo
-    postedAt: dtFuture(1, 20, 0), // posted al día siguiente 20:00 → futuro
+    transactionAt: null,
+    postedAt: dtFuture(1, 20, 0),
+    rawDescription: 'Cargo por Compra en Comercio Nac.',
   },
+  syncCompletedAt: new Date(),
+}));
+
+// ── CASO BICE-2 — BICE detallado (extrae hora del raw_description) ──
+box('CASO BICE-2 — BICE detallado: hora REAL extraída del raw', buildSyncSummary({
+  totalInserted: 1,
+  totalSpent: 1764, expenseCount: 1, totalIncome: 0, incomeCount: 0,
+  topMerchants: [],
+  newMovements: [
+    {
+      merchantName: 'Lime Viajes Jkj', amount: 1764, type: 'expense',
+      transactionAt: null,
+      postedAt: '2026-04-24T00:00:00+00:00',
+      icon: '🚗', resolverSource: 'trgm',
+      // RAW REAL de la DB:
+      rawDescription: 'Cargo por compra en LIME*VIAJE JKJ5   el 24/04/2026 a las 08:56:47 hrs., monto 1764.',
+      categoryName: 'Transporte',
+    },
+  ],
+  newMerchantsDiscovered: [],
+  resolverBreakdown: { trgm: 1 },
+  institutionName: 'Banco BICE',
+  todayTotals: { totalSpent: 1764, expenseCount: 1, totalIncome: 0, incomeCount: 0 },
+  lastSeenTx: null,
   syncCompletedAt: new Date(),
 }));
 

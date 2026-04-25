@@ -10,6 +10,7 @@
 import {
   formatChileTime,
   formatChileDateTime,
+  effectiveMovementTimestamp,
 } from '../../bot/v3/functions/shared/chile-time';
 
 export interface SyncSummaryInput {
@@ -54,6 +55,7 @@ export interface SyncSummaryInput {
     type: 'expense' | 'income';
     transactionAt: string | null;
     postedAt: string | null;
+    rawDescription: string | null;
   } | null;
   /** Cuándo terminó el sync — se imprime en el header. */
   syncCompletedAt: Date;
@@ -116,6 +118,7 @@ export function buildSyncSummary(input: SyncSummaryInput): string {
       const ts = formatMovementTimestamp(
         input.lastSeenTx.transactionAt,
         input.lastSeenTx.postedAt,
+        input.lastSeenTx.rawDescription ?? null,
         true, // include date
       );
       const sign = input.lastSeenTx.type === 'income' ? '+' : '−';
@@ -173,7 +176,7 @@ function formatMovementDebug(m: {
   rawDescription: string | null;
   categoryName: string | null;
 }): string {
-  const ts = formatMovementTimestamp(m.transactionAt, m.postedAt, false);
+  const ts = formatMovementTimestamp(m.transactionAt, m.postedAt, m.rawDescription, false);
   const sign = m.type === 'income' ? '+' : '−';
   const amount = `${sign}${fmt(m.amount)}`;
   const merchantIcon = m.icon ? `${m.icon} ` : m.type === 'income' ? '➕ ' : '🧾 ';
@@ -195,13 +198,10 @@ function formatMovementDebug(m: {
 
 /**
  * Formatea el timestamp de un movement con honestidad sobre qué fuente usamos.
- *
- * Reglas:
- * - Si transaction_at existe → mostrar esa hora (es la real de la compra).
- * - Si solo tenemos posted_at → mostrarlo con marca "(post bancario)" para
- *   que el usuario sepa que es la hora del posteo, no de la compra.
- * - Si posted_at es FUTURO respecto al sync (típico Banco BICE/Estado) →
- *   warning visible "⚠️ banco postea con fecha futura".
+ * Delega a `effectiveMovementTimestamp` que prueba en orden:
+ *   1. transaction_at (si no es futuro)
+ *   2. hora extraída del raw_description (BICE pattern)
+ *   3. posted_at (con flag isFuturePost)
  *
  * `withDate=true` incluye DD/MM antes de HH:MM (para heartbeat); por defecto
  * solo HH:MM (para detalle por movement).
@@ -209,21 +209,26 @@ function formatMovementDebug(m: {
 function formatMovementTimestamp(
   transactionAt: string | null,
   postedAt: string | null,
+  rawDescription: string | null,
   withDate: boolean,
 ): string {
   const fmt = withDate ? formatChileDateTime : formatChileTime;
+  const eff = effectiveMovementTimestamp(transactionAt, postedAt, rawDescription);
+  if (!eff.iso) return '<i>(sin fecha)</i>';
 
-  if (transactionAt) {
-    return `<b>${fmt(transactionAt)}</b> <i>(real)</i>`;
+  const time = `<b>${fmt(eff.iso)}</b>`;
+  switch (eff.source) {
+    case 'transaction_at':
+      return `${time} <i>(real)</i>`;
+    case 'raw_extracted':
+      return `${time} <i>(real, extraída del banco)</i>`;
+    case 'posted_at':
+      return eff.isFuturePost
+        ? `${time} ⚠️ <i>(banco postea con fecha futura)</i>`
+        : `${time} <i>(post bancario)</i>`;
+    default:
+      return time;
   }
-  if (postedAt) {
-    const isFuture = new Date(postedAt).getTime() > Date.now();
-    if (isFuture) {
-      return `<b>${fmt(postedAt)}</b> ⚠️ <i>(banco postea con fecha futura)</i>`;
-    }
-    return `<b>${fmt(postedAt)}</b> <i>(post bancario)</i>`;
-  }
-  return '<i>(sin fecha)</i>';
 }
 
 function labelResolver(source: string | null): string {
